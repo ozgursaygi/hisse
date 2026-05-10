@@ -18,7 +18,8 @@ for package in required_packages:
 
 # --- STANDART İMPORTLAR ---
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tüm TF loglarını kapat
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # OneDNN uyarısını kapat
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -167,11 +168,13 @@ def fill_missing_predictions(ticker, df, model, scaler, features, target_idx, lo
         curr_p = historical_df['Close'].iloc[-1]
 
         temp_batch = last_batch.copy()
+        # Yumuşatma faktörü - 0.0: dürüst, 0.3: daha tutucu
+        SMOOTH_FACTOR_HIST = 0.0
         recent_trend = np.mean(temp_batch[0, -10:, target_idx])
 
         for i in range(7):
             raw_pred = model.predict(temp_batch, verbose=0)[0,0]
-            p_sc = (raw_pred * 0.7) + (recent_trend * 0.3)
+            p_sc = (raw_pred * (1 - SMOOTH_FACTOR_HIST)) + (recent_trend * SMOOTH_FACTOR_HIST)
 
             d = np.zeros((1, len(features)))
             d[0, target_idx] = p_sc
@@ -197,6 +200,66 @@ def fill_missing_predictions(ticker, df, model, scaler, features, target_idx, lo
         print(f"   TOPLAM {filled_count} adet eksik gün (2020-Bugün arası) veritabanına eklendi.")
     else:
         print("   Tüm geçmiş tahminler zaten mevcut, güncel veri ile devam ediliyor.")
+
+
+# --- HIZLI VERSİYON: SADECE SON N GÜNÜ DOLDUR ---
+def fill_recent_predictions(ticker, df, model, scaler, features, target_idx, lookback, days=10):
+    """
+    Sadece son 'days' günü dolduran hızlı versiyon. GIF animasyonu için kullanılır.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    
+    # Son N iş gününü al
+    valid_dates = df.index[-days:]
+    
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT analiz_tarihi FROM tahminler WHERE sembol=?", (ticker,))
+    existing_dates = set(row[0] for row in cursor.fetchall())
+    
+    filled_count = 0
+    print(f"   -> Son {days} gün için tahmin geçmişi hazırlanıyor (GIF için)...")
+    
+    for current_date in valid_dates:
+        date_str = current_date.strftime('%Y-%m-%d')
+        
+        if date_str in existing_dates:
+            continue
+        
+        historical_df = df[df.index <= current_date]
+        if len(historical_df) < lookback + 10:
+            continue
+        
+        data = historical_df[features].values
+        full_data_scaled = scaler.transform(data)
+        last_batch = full_data_scaled[-lookback:].reshape(1, lookback, len(features))
+        
+        future_prices = []
+        curr_p = historical_df['Close'].iloc[-1]
+        temp_batch = last_batch.copy()
+        
+        SMOOTH_FACTOR_HIST = 0.0
+        recent_trend = np.mean(temp_batch[0, -10:, target_idx])
+        
+        for i in range(7):
+            raw_pred = model.predict(temp_batch, verbose=0)[0, 0]
+            p_sc = (raw_pred * (1 - SMOOTH_FACTOR_HIST)) + (recent_trend * SMOOTH_FACTOR_HIST)
+            d = np.zeros((1, len(features)))
+            d[0, target_idx] = p_sc
+            p_ret = scaler.inverse_transform(d)[0, target_idx]
+            curr_p = curr_p * np.exp(p_ret)
+            future_prices.append(curr_p)
+            
+            new_row = temp_batch[0, -1, :].copy()
+            new_row[target_idx] = p_sc
+            temp_batch = np.append(temp_batch[:, 1:, :], new_row.reshape(1, 1, len(features)), axis=1)
+        
+        fut_dates = pd.date_range(current_date + timedelta(days=1), periods=7)
+        save_predictions_to_sqlite(ticker, fut_dates, future_prices, analysis_date=date_str)
+        filled_count += 1
+    
+    conn.close()
+    if filled_count > 0:
+        print(f"   {filled_count} günlük tahmin geçmişi eklendi.")
 
 
 # --- GIF OLUŞTURMA ---
@@ -707,45 +770,112 @@ def analyze_ticker(ticker, info, macro_df):
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001, verbose=0)
 
     print(f"   -> Model eğitiliyor...")
-    model.fit(X_train, y_train, epochs=100, batch_size=32, validation_data=(X_val, y_val), callbacks=[early_stopping, reduce_lr], verbose=0)
-
-    # Geçmiş günleri tamamla
-    fill_missing_predictions(ticker, df, model, scaler, features, target_idx, lookback)
+    history = model.fit(X_train, y_train, epochs=100, batch_size=32, validation_data=(X_val, y_val), callbacks=[early_stopping, reduce_lr], verbose=0)
+    
+    # =====================================================
+    # OVERFIT KONTROLÜ - Train ve Val performansı
+    # =====================================================
+    final_train_loss = history.history['loss'][-1]
+    final_val_loss = history.history['val_loss'][-1]
+    best_val_loss = min(history.history['val_loss'])
+    epochs_run = len(history.history['loss'])
+    
+    # Train R² (in-sample)
+    pred_train = model.predict(X_train, verbose=0).flatten()
+    try: r2_train = r2_score(y_train, pred_train)
+    except: r2_train = 0
+    
+    # Val R² (out-of-sample, eğitimde "görüldü" ama label olarak kullanılmadı)
+    pred_val = model.predict(X_val, verbose=0).flatten()
+    try: r2_val_set = r2_score(y_val, pred_val)
+    except: r2_val_set = 0
+    
+    print(f"   -> Eğitim: {epochs_run} epoch | Train Loss: {final_train_loss:.5f} | Val Loss: {final_val_loss:.5f} (best: {best_val_loss:.5f})")
+    print(f"   -> Train R²: {r2_train:.4f} | Val R²: {r2_val_set:.4f}")
+    if r2_train - r2_val_set > 0.15:
+        print(f"   ⚠️  UYARI: Train ve Val R² arasında büyük fark var. Olası overfitting!")
+    
+    # Veri seti boyutları
+    print(f"   -> Veri: Train={len(X_train)} | Val={len(X_val)} | Test={len(X_test) if 'X_test' in dir() else 'N/A'}")
+    
+    # ============================================================
+    # GEÇMİŞ TAHMİN DOLDURMA - HIZ İÇİN KAPATILDI
+    # GIF için sadece son 10 günün tahminleri yapılır (hızlı).
+    # Tam geçmiş için: ENABLE_FILL_HISTORY = True yap
+    # ============================================================
+    ENABLE_FILL_HISTORY = False
+    if ENABLE_FILL_HISTORY:
+        fill_missing_predictions(ticker, df, model, scaler, features, target_idx, lookback)
+    else:
+        # Sadece son 10 günü doldur - GIF için yeterli
+        fill_recent_predictions(ticker, df, model, scaler, features, target_idx, lookback, days=10)
 
     pred_test_scaled = model.predict(X_test, verbose=0)
     dummy = np.zeros((len(pred_test_scaled), len(features)))
     dummy[:, target_idx] = pred_test_scaled.flatten()
     pred_test_ret = scaler.inverse_transform(dummy)[:, target_idx]
 
+    # ============================================================
+    # DOĞRU HİZALAMA: 
+    # X_test, val_split-lookback'ten başlar, indekslemesi şöyledir:
+    # X_test[i] = data[val_split-lookback+i : val_split+i]
+    # y_test[i] = data[val_split+i, target_idx] = günün log_return'i
+    # 
+    # Yani pred_test_ret[i], val_split+i. günün log return tahmini.
+    # actual_prices[i] = df['Close'].iloc[val_split + i]
+    # 
+    # Log return: log(P[t]/P[t-1]) - yani val_split+i. günün getirisi
+    # P[val_split+i-1] -> P[val_split+i] hareketini gösterir.
+    # ============================================================
+    
     actual_prices = df['Close'].iloc[val_split:].values
+    actual_prices_with_prev = df['Close'].iloc[val_split-1:].values  # bir gün öncesi dahil
     min_len = min(len(pred_test_ret), len(actual_prices))
     pred_test_ret = pred_test_ret[:min_len]
     actual_prices = actual_prices[:min_len]
 
-    actual_returns_log = np.diff(np.log(actual_prices))
-    if len(pred_test_ret) > len(actual_returns_log):
-        pred_test_ret_aligned = pred_test_ret[:len(actual_returns_log)]
-    else:
-        pred_test_ret_aligned = pred_test_ret
-
-    try: r2_val = r2_score(actual_returns_log, pred_test_ret_aligned)
+    # GERÇEK log returns: P[val_split+i] / P[val_split+i-1]
+    actual_returns_log = np.log(actual_prices_with_prev[1:min_len+1] / actual_prices_with_prev[:min_len])
+    
+    # R2 - tahmin edilen ve gerçek log return aynı günü temsil eder (DOĞRU HİZALAMA)
+    try: r2_val = r2_score(actual_returns_log, pred_test_ret)
     except: r2_val = 0
 
+    # ============================================================
+    # KRİTİK: Dürüst test metriği için TEACHER FORCING YOK!
+    # Gerçek koşulda model sadece tahminlerine güvenir.
+    # rec_prices: önceki TAHMİN edilen fiyattan başlayarak ileri yürür
+    # ============================================================
     rec_prices = []
-    initial_price = df['Close'].iloc[val_split-1]
-
+    prev_price = df['Close'].iloc[val_split-1]  # Sadece başlangıç noktası gerçek
     for i in range(min_len):
-        prev = initial_price if i == 0 else actual_prices[i-1]
-        rec_prices.append(prev * np.exp(pred_test_ret[i]))
+        prev_price = prev_price * np.exp(pred_test_ret[i])  # ÖNCEKİ TAHMİN kullanılır
+        rec_prices.append(prev_price)
     rec_prices = np.array(rec_prices)
 
-    price_acc = 100 - (mean_absolute_percentage_error(actual_prices, rec_prices) * 100)
-    dir_acc = (np.sum(np.sign(np.diff(actual_prices)) == np.sign(np.diff(rec_prices))) / (len(actual_prices)-1)) * 100 if len(actual_prices)>1 else 0
+    # 1-ADIM ÖNCELİK YÖN DOĞRULUĞU: 
+    # Tahmin edilen günlük getirinin yönü, gerçek günlük getirinin yönüyle eşleşiyor mu?
+    dir_acc = (np.sum(np.sign(pred_test_ret) == np.sign(actual_returns_log)) / len(actual_returns_log)) * 100 if len(actual_returns_log)>0 else 0
+    
+    # 1-ADIM TEACHER FORCING ile fiyat doğruluğu (referans için)
+    rec_prices_tf = []
+    for i in range(min_len):
+        prev = df['Close'].iloc[val_split-1] if i == 0 else actual_prices[i-1]
+        rec_prices_tf.append(prev * np.exp(pred_test_ret[i]))
+    rec_prices_tf = np.array(rec_prices_tf)
+    price_acc = 100 - (mean_absolute_percentage_error(actual_prices, rec_prices_tf) * 100)
 
     stock_ret_series = df['Log_Ret']
     beta, alpha = calculate_alpha_beta(stock_ret_series, market_returns)
     extended_metrics = calculate_metrics_extended(rec_prices, pred_test_ret)
 
+    # ============================================================
+    # 7 GÜNLÜK GELECEK TAHMİNİ (Rekürsif - saf model çıktısı)
+    # SMOOTH_FACTOR=0 -> Saf model tahmini (dürüst)
+    # SMOOTH_FACTOR=0.3 -> Trendle yumuşatılmış (daha tutucu, ama metriğe sızabilir)
+    # ============================================================
+    SMOOTH_FACTOR = 0.0  # Dürüst tahmin için 0, daha tutucu için 0.3
+    
     full_data_scaled = scaler.transform(data)
     last_batch = full_data_scaled[-lookback:].reshape(1, lookback, len(features))
     future_prices = []
@@ -756,7 +886,8 @@ def analyze_ticker(ticker, info, macro_df):
 
     for i in range(7):
         raw_pred = model.predict(temp_batch, verbose=0)[0,0]
-        p_sc = (raw_pred * 0.7) + (recent_trend * 0.3)
+        # Yumuşatma faktörü 0 ise saf model tahmini kullanılır
+        p_sc = (raw_pred * (1 - SMOOTH_FACTOR)) + (recent_trend * SMOOTH_FACTOR)
         d = np.zeros((1, len(features)))
         d[0, target_idx] = p_sc
         p_ret = scaler.inverse_transform(d)[0, target_idx]
