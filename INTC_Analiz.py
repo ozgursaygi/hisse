@@ -1,25 +1,37 @@
-# --- OTOMATİK KURULUM VE BAĞLILIK KONTROLÜ (AUTO-INSTALLER v3) ---
+# ============================================================
+# INTC AI ANALİZ PANELİ v10.0 - BİLİMSEL VERSİYON
+# 
+# Yenilikler:
+# - Walk-Forward Cross-Validation (zaman serisi için doğru CV)
+# - Ensemble (3 farklı seed ile 3 model ortalaması)
+# - Naive baseline karşılaştırması (Random Walk, Last Value)
+# - Diebold-Mariano testi (istatistiksel anlamlılık)
+# - Confidence intervals (Ensemble varyansı tabanlı)
+# - 15 günlük tahmin
+# - Backtest tabanlı gerçek Sharpe
+# - GIF kaldırıldı
+# ============================================================
+
 import sys
 import subprocess
 import importlib
-import sqlite3 
+import sqlite3
 
 def install_package(package):
     print(f"OTOMATİK KURULUM: '{package}' yükleniyor...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--no-cache-dir"])
 
-# SADECE GEREKLİ KÜTÜPHANELER
-required_packages = ['tf-keras', 'ta', 'yfinance', 'GoogleNews', 'textblob', 'scipy', 'seaborn', 'sklearn', 'imageio', 'statsmodels']
+required_packages = ['tf-keras', 'ta', 'yfinance', 'GoogleNews', 'textblob', 
+                     'scipy', 'seaborn', 'sklearn', 'statsmodels']
 for package in required_packages:
     try: importlib.import_module(package.replace('-', '_'))
     except ImportError:
         try: install_package(package)
         except: pass
 
-# --- STANDART İMPORTLAR ---
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tüm TF loglarını kapat
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # OneDNN uyarısını kapat
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -36,30 +48,28 @@ from GoogleNews import GoogleNews
 import ta
 from textblob import TextBlob
 from scipy import stats
+import seaborn as sns
+
 try:
     from statsmodels.tsa.stattools import acf
     HAS_STATSMODELS = True
 except ImportError:
     HAS_STATSMODELS = False
-import seaborn as sns
-import imageio.v2 as imageio 
 
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_squared_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, LSTM, Dropout, Input, Bidirectional
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import Huber
-from sklearn.metrics import mean_absolute_percentage_error
 
 # --- DATABASE AYARLARI ---
 DB_FOLDER = r"C:\Projects\ML"
-DB_NAME = "data_intc.db"  # INTC için özel veritabanı
+DB_NAME = "data_intc.db"
 DB_PATH = os.path.join(DB_FOLDER, DB_NAME)
 
 def init_db():
-    """Veritabanı ve tabloları oluşturur."""
     if not os.path.exists(DB_FOLDER):
         os.makedirs(DB_FOLDER)
     conn = sqlite3.connect(DB_PATH)
@@ -67,23 +77,16 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS gunluk_veriler (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tarih TEXT,
-            sembol TEXT,
-            acilis REAL,
-            yuksek REAL,
-            dusuk REAL,
-            kapanis REAL,
-            hacim REAL,
+            tarih TEXT, sembol TEXT,
+            acilis REAL, yuksek REAL, dusuk REAL, kapanis REAL, hacim REAL,
             UNIQUE(tarih, sembol)
         )
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tahminler (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            analiz_tarihi TEXT,
-            hedef_tarih TEXT,
-            sembol TEXT,
-            tahmin_fiyati REAL,
+            analiz_tarihi TEXT, hedef_tarih TEXT,
+            sembol TEXT, tahmin_fiyati REAL,
             UNIQUE(analiz_tarihi, hedef_tarih, sembol)
         )
     ''')
@@ -91,256 +94,42 @@ def init_db():
     conn.close()
 
 def save_to_sqlite(ticker, df):
-    """Gerçekleşen verileri kaydeder (2020 sonrası - Eksikleri tamamlar)."""
     if df is None or df.empty: return
-
     start_date_filter = pd.Timestamp("2020-01-01")
     df_filtered = df[df.index >= start_date_filter].copy()
-
     if df_filtered.empty: return
-
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
     for index, row in df_filtered.iterrows():
         date_str = index.strftime('%Y-%m-%d')
         try:
             cursor.execute('''
-                INSERT OR IGNORE INTO gunluk_veriler (tarih, sembol, acilis, yuksek, dusuk, kapanis, hacim)
+                INSERT OR IGNORE INTO gunluk_veriler 
+                (tarih, sembol, acilis, yuksek, dusuk, kapanis, hacim)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (date_str, ticker, row['Open'], row['High'], row['Low'], row['Close'], row['Volume']))
         except: pass
-
     conn.commit()
     conn.close()
 
 def save_predictions_to_sqlite(ticker, dates, prices, analysis_date=None):
-    """Modelin ürettiği 7 günlük tahmini veritabanına kaydeder."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
     if analysis_date is None:
         analiz_tarihi = datetime.now().strftime('%Y-%m-%d')
     else:
         analiz_tarihi = analysis_date
-
     for date, price in zip(dates, prices):
         hedef_tarih = date.strftime('%Y-%m-%d')
         try:
             cursor.execute('''
-                INSERT OR REPLACE INTO tahminler (analiz_tarihi, hedef_tarih, sembol, tahmin_fiyati)
+                INSERT OR REPLACE INTO tahminler 
+                (analiz_tarihi, hedef_tarih, sembol, tahmin_fiyati)
                 VALUES (?, ?, ?, ?)
             ''', (analiz_tarihi, hedef_tarih, ticker, float(price)))
         except: pass
     conn.commit()
     conn.close()
-
-# --- GÜNCELLENMİŞ EKSİK TAHMİNLERİ DOLDURMA (2020'TEN İTİBAREN) ---
-def fill_missing_predictions(ticker, df, model, scaler, features, target_idx, lookback):
-    """
-    2020-01-01 tarihinden bugüne kadar olan verilerde veritabanında tahmini olmayan günleri bulur 
-    ve o günün şartlarıyla (geleceği görmeden) tahmin üretip kaydeder.
-    """
-    conn = sqlite3.connect(DB_PATH)
-
-    start_date = pd.Timestamp("2020-01-01")
-    valid_dates = df[df.index >= start_date].index
-
-    filled_count = 0
-    print(f"   -> Geçmiş analizler kontrol ediliyor (Başlangıç: {start_date.strftime('%Y-%m-%d')})...")
-
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT analiz_tarihi FROM tahminler WHERE sembol=?", (ticker,))
-    existing_dates = set(row[0] for row in cursor.fetchall())
-
-    for current_date in valid_dates:
-        date_str = current_date.strftime('%Y-%m-%d')
-
-        if date_str in existing_dates:
-            continue
-
-        historical_df = df[df.index <= current_date]
-
-        if len(historical_df) < lookback + 10: 
-            continue
-
-        data = historical_df[features].values
-        full_data_scaled = scaler.transform(data)
-
-        last_batch = full_data_scaled[-lookback:].reshape(1, lookback, len(features))
-
-        future_prices = []
-        curr_p = historical_df['Close'].iloc[-1]
-
-        temp_batch = last_batch.copy()
-        # Yumuşatma faktörü - 0.0: dürüst, 0.3: daha tutucu
-        SMOOTH_FACTOR_HIST = 0.0
-        recent_trend = np.mean(temp_batch[0, -10:, target_idx])
-
-        for i in range(7):
-            raw_pred = model.predict(temp_batch, verbose=0)[0,0]
-            p_sc = (raw_pred * (1 - SMOOTH_FACTOR_HIST)) + (recent_trend * SMOOTH_FACTOR_HIST)
-
-            d = np.zeros((1, len(features)))
-            d[0, target_idx] = p_sc
-
-            p_ret = scaler.inverse_transform(d)[0, target_idx]
-
-            curr_p = curr_p * np.exp(p_ret)
-            future_prices.append(curr_p)
-
-            new_row = temp_batch[0, -1, :].copy()
-            new_row[target_idx] = p_sc 
-            temp_batch = np.append(temp_batch[:, 1:, :], new_row.reshape(1,1,len(features)), axis=1)
-
-        fut_dates = pd.date_range(current_date + timedelta(days=1), periods=7)
-        save_predictions_to_sqlite(ticker, fut_dates, future_prices, analysis_date=date_str)
-
-        filled_count += 1
-        if filled_count % 500 == 0:
-             print(f"      ... {filled_count} gün işlendi ({date_str})")
-
-    conn.close()
-    if filled_count > 0:
-        print(f"   TOPLAM {filled_count} adet eksik gün (2020-Bugün arası) veritabanına eklendi.")
-    else:
-        print("   Tüm geçmiş tahminler zaten mevcut, güncel veri ile devam ediliyor.")
-
-
-# --- HIZLI VERSİYON: SADECE SON N GÜNÜ DOLDUR ---
-def fill_recent_predictions(ticker, df, model, scaler, features, target_idx, lookback, days=10):
-    """
-    Sadece son 'days' günü dolduran hızlı versiyon. GIF animasyonu için kullanılır.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    
-    # Son N iş gününü al
-    valid_dates = df.index[-days:]
-    
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT analiz_tarihi FROM tahminler WHERE sembol=?", (ticker,))
-    existing_dates = set(row[0] for row in cursor.fetchall())
-    
-    filled_count = 0
-    print(f"   -> Son {days} gün için tahmin geçmişi hazırlanıyor (GIF için)...")
-    
-    for current_date in valid_dates:
-        date_str = current_date.strftime('%Y-%m-%d')
-        
-        if date_str in existing_dates:
-            continue
-        
-        historical_df = df[df.index <= current_date]
-        if len(historical_df) < lookback + 10:
-            continue
-        
-        data = historical_df[features].values
-        full_data_scaled = scaler.transform(data)
-        last_batch = full_data_scaled[-lookback:].reshape(1, lookback, len(features))
-        
-        future_prices = []
-        curr_p = historical_df['Close'].iloc[-1]
-        temp_batch = last_batch.copy()
-        
-        SMOOTH_FACTOR_HIST = 0.0
-        recent_trend = np.mean(temp_batch[0, -10:, target_idx])
-        
-        for i in range(7):
-            raw_pred = model.predict(temp_batch, verbose=0)[0, 0]
-            p_sc = (raw_pred * (1 - SMOOTH_FACTOR_HIST)) + (recent_trend * SMOOTH_FACTOR_HIST)
-            d = np.zeros((1, len(features)))
-            d[0, target_idx] = p_sc
-            p_ret = scaler.inverse_transform(d)[0, target_idx]
-            curr_p = curr_p * np.exp(p_ret)
-            future_prices.append(curr_p)
-            
-            new_row = temp_batch[0, -1, :].copy()
-            new_row[target_idx] = p_sc
-            temp_batch = np.append(temp_batch[:, 1:, :], new_row.reshape(1, 1, len(features)), axis=1)
-        
-        fut_dates = pd.date_range(current_date + timedelta(days=1), periods=7)
-        save_predictions_to_sqlite(ticker, fut_dates, future_prices, analysis_date=date_str)
-        filled_count += 1
-    
-    conn.close()
-    if filled_count > 0:
-        print(f"   {filled_count} günlük tahmin geçmişi eklendi.")
-
-
-# --- GIF OLUŞTURMA ---
-def create_prediction_gif(ticker, current_df, prediction_dates, prediction_prices):
-    """Son 10 analiz gününün tahminlerini animasyon (GIF) haline getirir."""
-    conn = sqlite3.connect(DB_PATH)
-    dates_query = """
-        SELECT DISTINCT analiz_tarihi 
-        FROM tahminler 
-        WHERE sembol = ? 
-        ORDER BY analiz_tarihi DESC 
-        LIMIT 10 
-    """
-    try:
-        past_dates = pd.read_sql(dates_query, conn, params=(ticker,))
-        if past_dates.empty:
-            conn.close()
-            return None 
-
-        past_dates = past_dates.sort_values('analiz_tarihi')
-        unique_dates = past_dates['analiz_tarihi'].tolist()
-
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        if today_str not in unique_dates:
-            unique_dates.append(today_str)
-
-    except:
-        conn.close()
-        return None
-
-    frames = []
-
-    y_min = min(current_df['Close'].tail(60).min(), min(prediction_prices)) * 0.98
-    y_max = max(current_df['Close'].tail(60).max(), max(prediction_prices)) * 1.02
-    x_start = current_df.index[-60]
-    x_end = prediction_dates[-1] + timedelta(days=2)
-
-    for date_str in unique_dates:
-        fig, ax = plt.subplots(figsize=(12, 6))
-
-        ax.plot(current_df.index[-90:], current_df['Close'].tail(90), color='black', alpha=0.3, label='Gerçek Fiyat', linewidth=1.5)
-
-        ax.plot(prediction_dates, prediction_prices, color='blue', linestyle='-', linewidth=2.5, alpha=0.9, label=f"GÜNCEL ({today_str})")
-
-        if date_str != today_str:
-            q = "SELECT hedef_tarih, tahmin_fiyati FROM tahminler WHERE sembol = ? AND analiz_tarihi = ?"
-            hist_data = pd.read_sql(q, conn, params=(ticker, date_str))
-
-            if not hist_data.empty:
-                hist_data['hedef_tarih'] = pd.to_datetime(hist_data['hedef_tarih'])
-                ax.plot(hist_data['hedef_tarih'], hist_data['tahmin_fiyati'], 
-                        color='red', marker='o', linestyle='--', linewidth=2, label=f"Eski ({date_str})")
-
-                ax.set_title(f"Tahmin Evrimi: {date_str} vs GÜNCEL", fontsize=14, fontweight='bold', color='#374151')
-        else:
-             ax.set_title(f"Tahmin Evrimi: {date_str} (Bugün)", fontsize=14, fontweight='bold', color='#374151')
-
-        ax.set_ylim(y_min, y_max)
-        ax.set_xlim(x_start, x_end)
-        ax.grid(True, alpha=0.2)
-        ax.legend(loc='upper left', fontsize=9)
-
-        buf = BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-        buf.seek(0)
-        frames.append(imageio.imread(buf))
-        plt.close(fig)
-
-    conn.close()
-
-    if not frames: return None
-
-    gif_buf = BytesIO()
-    imageio.mimsave(gif_buf, frames, format='GIF', duration=800, loop=0)
-    return base64.b64encode(gif_buf.getvalue()).decode('utf-8')
-
 
 # --- SEED SABİTLEME ---
 def set_seeds(seed=42):
@@ -350,24 +139,18 @@ def set_seeds(seed=42):
     tf.random.set_seed(seed)
 set_seeds()
 
-# --- VARLIK LİSTESİ - SADECE INTC ---
-etf_map = {
-    'INTC': {'name': 'Intel Corporation', 'type': 'us_stock'}
-}
+# --- VARLIK ---
+TICKER = 'INTC'
+TICKER_NAME = 'Intel Corporation'
+PREDICTION_HORIZON = 15  # 15 günlük tahmin
 
-# --- MAKRO VERİ (ABD ODAKLI) ---
+# --- MAKRO VERİ ---
 def get_macro_data():
     end = datetime.now()
     start = end - timedelta(days=12*365)
-    # ABD hissesi için ABD odaklı makro veriler
     tickers = {
-        "^VIX": "VIX",                # Korku Endeksi
-        "^TNX": "US_10Y_BOND",        # ABD 10 Yıllık Tahvil Faizi
-        "CL=F": "OIL",                # Ham Petrol
-        "DX-Y.NYB": "DXY",            # Dolar Endeksi
-        "^GSPC": "SP500",             # S&P 500
-        "^IXIC": "NASDAQ",            # NASDAQ Composite
-        "SOXX": "SEMI_ETF"            # Yarı İletken ETF'i (Intel'in sektör endeksi)
+        "^VIX": "VIX", "^TNX": "US_10Y_BOND", "CL=F": "OIL",
+        "DX-Y.NYB": "DXY", "^GSPC": "SP500", "^IXIC": "NASDAQ", "SOXX": "SEMI_ETF"
     }
     try:
         df = yf.download(list(tickers.keys()), start=start, end=end, progress=False)['Close']
@@ -375,52 +158,61 @@ def get_macro_data():
         df.rename(columns=tickers, inplace=True)
         return df.ffill().bfill()
     except Exception as e:
-        print(f"UYARI: Makro veriler indirilemedi ({e}). Analiz makro verisiz devam edecek.")
+        print(f"UYARI: Makro veriler indirilemedi ({e}).")
         return pd.DataFrame()
 
 def get_stock_data(symbol, macro_df):
     end = datetime.now()
     start = end - timedelta(days=12*365)
-
     try:
         df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
     except Exception as e:
-        print(f"HATA: {symbol} indirilirken bağlantı hatası oluştu: {e}")
+        print(f"HATA: {symbol} indirilemedi: {e}")
         return None
-
-    if df is None or df.empty: 
-        print(f"UYARI: {symbol} için veri bulunamadı veya boş döndü.")
-        return None
+    if df is None or df.empty: return None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     cols_to_keep = ['Open', 'High', 'Low', 'Close', 'Volume']
     for c in cols_to_keep:
         if c not in df.columns: df[c] = df['Close']
     df = df[cols_to_keep].dropna()
-
-    if len(df) < 60:
-        print(f"UYARI: {symbol} için yeterli geçmiş veri yok (Sadece {len(df)} gün bulundu). Analiz atlanıyor.")
-        return None
-
+    if len(df) < 200: return None
     save_to_sqlite(symbol, df)
-
+    
+    # GENİŞLETİLMİŞ FEATURE ENGINEERING
     try:
         df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
         df['MACD'] = ta.trend.MACD(df['Close']).macd()
+        df['MACD_Signal'] = ta.trend.MACD(df['Close']).macd_signal()
         df['ATR'] = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close']).average_true_range()
         df['CCI'] = ta.trend.CCIIndicator(df['High'], df['Low'], df['Close']).cci()
+        df['SMA20'] = ta.trend.SMAIndicator(df['Close'], window=20).sma_indicator()
         df['SMA50'] = ta.trend.SMAIndicator(df['Close'], window=50).sma_indicator()
         df['SMA200'] = ta.trend.SMAIndicator(df['Close'], window=200).sma_indicator()
+        
+        bb = ta.volatility.BollingerBands(df['Close'])
+        df['BB_high'] = bb.bollinger_hband()
+        df['BB_low'] = bb.bollinger_lband()
+        df['BB_pct'] = (df['Close'] - df['BB_low']) / (df['BB_high'] - df['BB_low'])
+        
         df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+        df['Vol_5'] = df['Log_Ret'].rolling(5).std()
+        df['Vol_20'] = df['Log_Ret'].rolling(20).std()
+        df['Mom_5'] = df['Close'].pct_change(5)
+        df['Mom_20'] = df['Close'].pct_change(20)
+        df['Vol_ratio'] = df['Volume'] / df['Volume'].rolling(20).mean()
+        df['Px_SMA50'] = df['Close'] / df['SMA50']
+        df['Px_SMA200'] = df['Close'] / df['SMA200']
+        
         if not macro_df.empty:
             df = df.join(macro_df, how='left').ffill().dropna()
         else:
             df = df.dropna()
         return df
     except Exception as e:
-        print(f"HATA: {symbol} için teknik indikatörler hesaplanırken hata oluştu: {e}")
+        print(f"HATA: İndikatörler hesaplanamadı: {e}")
         return None
 
-# --- SENTIMENT FONKSİYONU ---
+# --- SENTIMENT ---
 def get_advanced_sentiment(ticker):
     news_items = []
     try:
@@ -428,18 +220,18 @@ def get_advanced_sentiment(ticker):
         news = stock.news
         titles = []
         if news:
-            for n in news[:10]:  # INTC için daha fazla haber
-                title = n.get('title')
+            for n in news[:10]:
+                if not isinstance(n, dict): continue
+                title = n.get('title') or (n.get('content', {}) or {}).get('title')
                 if not title: continue
                 titles.append(title)
                 ts = n.get('providerPublishTime', 0)
                 try: date_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
                 except: date_str = "Tarih Yok"
                 news_items.append({'date': date_str, 'title': title})
-
         if not titles:
             try:
-                googlenews = GoogleNews(lang='en', region='US') 
+                googlenews = GoogleNews(lang='en', region='US')
                 googlenews.set_period('7d')
                 googlenews.search("Intel INTC stock news")
                 results = googlenews.result()[:10]
@@ -449,65 +241,56 @@ def get_advanced_sentiment(ticker):
                         titles.append(t)
                         news_items.append({'date': item.get('date', ''), 'title': t})
             except: pass
-
         if not titles: return 0.0, news_items
-        scores = []
-        for t in titles:
-            analysis = TextBlob(t)
-            scores.append(analysis.sentiment.polarity)
+        scores = [TextBlob(t).sentiment.polarity for t in titles]
         return np.mean(scores) if scores else 0.0, news_items
     except: return 0.0, []
 
+# --- FINANSAL METRİKLER ---
 def calculate_alpha_beta(stock_returns, market_returns, risk_free_rate=0.045):
-    """ABD için risk-free rate %4.5 (US Treasury 10Y civarı)"""
     common_idx = stock_returns.index.intersection(market_returns.index)
     if len(common_idx) < 30: return 1.0, 0.0
-    stock_ret = stock_returns.loc[common_idx].values.flatten()
-    mkt_ret = market_returns.loc[common_idx].values.flatten()
-    valid_mask = np.isfinite(stock_ret) & np.isfinite(mkt_ret)
-    stock_ret = stock_ret[valid_mask]
-    mkt_ret = mkt_ret[valid_mask]
-    if len(stock_ret) < 30: return 1.0, 0.0
-    cov_matrix = np.cov(stock_ret, mkt_ret)
-    covariance = cov_matrix[0, 1]
-    variance = np.var(mkt_ret)
-    if variance == 0: return 1.0, 0.0
-    beta = covariance / variance
+    s = stock_returns.loc[common_idx].values.flatten()
+    m = market_returns.loc[common_idx].values.flatten()
+    mask = np.isfinite(s) & np.isfinite(m)
+    s, m = s[mask], m[mask]
+    if len(s) < 30: return 1.0, 0.0
+    cov = np.cov(s, m)[0, 1]
+    var = np.var(m)
+    if var == 0: return 1.0, 0.0
+    beta = cov / var
     rf_daily = (1 + risk_free_rate)**(1/252) - 1
-    alpha = np.mean(stock_ret) - (rf_daily + beta * (np.mean(mkt_ret) - rf_daily))
-    return beta, alpha * 252 
+    alpha = (np.mean(s) - (rf_daily + beta * (np.mean(m) - rf_daily))) * 252
+    return beta, alpha
 
-def generate_signal(current_price, predicted_price, atr_value):
-    expected_change = (predicted_price - current_price)
-    threshold = atr_value * 0.5 
-    if expected_change > threshold: return "GÜÇLÜ AL", "green", "Pozitif Trend"
-    elif expected_change > 0: return "AL / TUT", "blue", "Zayıf Yükseliş"
-    elif expected_change < -threshold: return "SAT", "red", "Negatif Trend"
-    else: return "NÖTR", "gray", "Yatay Seyir"
-
-# --- İSTATİSTİK FONKSİYONLARI ---
-def calculate_metrics_extended(prices, predicted_returns, market_returns=None, risk_free_rate=0.045):
-    """ABD için risk-free rate %4.5"""
-    prices = np.array(prices)
-    if len(prices) < 2: return {}
-    real_returns = np.diff(np.log(prices))
-    peak = prices[0]
-    max_dd = 0
-    for p in prices:
-        if p > peak: peak = p
-        dd = (peak - p) / peak if peak != 0 else 0
-        if dd > max_dd: max_dd = dd
-    mdd_pct = max_dd * 100
-    avg_ret = np.mean(predicted_returns)
-    std_ret = np.std(predicted_returns)
-    sharpe = (np.sqrt(252) * (avg_ret - risk_free_rate/252) / std_ret) if std_ret > 0 else 0
-    annual_volatility = std_ret * np.sqrt(252) * 100 
-    negative_returns = predicted_returns[predicted_returns < 0]
-    downside_std = np.std(negative_returns)
-    sortino = (np.sqrt(252) * (avg_ret - risk_free_rate/252) / downside_std) if downside_std > 0 else 0
-    annualized_return = avg_ret * 252
-    calmar = (annualized_return / max_dd) if max_dd > 0 else 0
-    return {'mdd': mdd_pct, 'sharpe': sharpe, 'sortino': sortino, 'calmar': calmar, 'volatility': annual_volatility}
+def calculate_real_metrics(returns_array, risk_free_rate=0.045):
+    """Gerçek log returns üzerinden hesaplanan metrikler"""
+    returns_array = np.array(returns_array)
+    returns_array = returns_array[np.isfinite(returns_array)]
+    if len(returns_array) < 2: 
+        return {'mdd': 0, 'sharpe': 0, 'sortino': 0, 'calmar': 0, 'volatility': 0}
+    
+    cum_returns = np.exp(np.cumsum(returns_array))
+    peak = np.maximum.accumulate(cum_returns)
+    drawdown = (cum_returns - peak) / peak
+    mdd = np.abs(np.min(drawdown)) * 100
+    
+    avg_ret = np.mean(returns_array)
+    std_ret = np.std(returns_array)
+    
+    rf_daily = (1 + risk_free_rate)**(1/252) - 1
+    sharpe = (np.sqrt(252) * (avg_ret - rf_daily) / std_ret) if std_ret > 0 else 0
+    
+    neg_returns = returns_array[returns_array < 0]
+    downside_std = np.std(neg_returns) if len(neg_returns) > 1 else std_ret
+    sortino = (np.sqrt(252) * (avg_ret - rf_daily) / downside_std) if downside_std > 0 else 0
+    
+    annual_vol = std_ret * np.sqrt(252) * 100
+    annual_ret = avg_ret * 252
+    calmar = (annual_ret * 100 / mdd) if mdd > 0 else 0
+    
+    return {'mdd': mdd, 'sharpe': sharpe, 'sortino': sortino, 
+            'calmar': calmar, 'volatility': annual_vol}
 
 def get_benchmark_data(benchmark_symbol):
     end = datetime.now()
@@ -518,120 +301,306 @@ def get_benchmark_data(benchmark_symbol):
         return np.log(df / df.shift(1)).dropna()
     except: return None
 
-# --- HTML RAPOR ---
-class HTMLRapor:
-    def __init__(self):
-        self.content = """
-        <!DOCTYPE html>
-        <html lang="tr">
-        <head>
-            <meta charset="UTF-8">
-            <title>INTC - AI Destekli Finansal Öngörü Paneli</title>
-            <style>
-                body { font-family: 'Segoe UI', sans-serif; background: #f3f4f6; padding: 20px; }
-                .container { max-width: 1200px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                h1 { text-align: center; color: #111827; border-bottom: 3px solid #0071c5; padding-bottom: 15px; }
-                .report-section { margin-bottom: 50px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; background: #fff; }
-                .header { background: #0071c5; color: white; padding: 15px 25px; font-size: 1.4em; font-weight: 600; display: flex; justify-content: space-between; }
-                .signal-banner { padding: 15px; text-align: center; font-weight: bold; font-size: 1.2em; letter-spacing: 1px; }
-                .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #e5e7eb; }
-                .stat-box { background: #fff; padding: 15px; text-align: center; height: 110px; display: flex; flex-direction: column; justify-content: center; }
-                .stat-label { font-size: 0.8em; color: #6b7280; font-weight: 700; text-transform: uppercase; margin-bottom: 5px; }
-                .stat-val { font-size: 1.3em; font-weight: 800; color: #111827; }
-                .stat-sub { font-size: 0.7em; color: #9ca3af; }
-                .chart-area { padding: 20px; text-align: center; background: #f9fafb; }
-                .main-chart { width: 100%; border-radius: 8px; border: 1px solid #eee; }
-                .mini-charts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; padding: 15px; background: #fff; }
-                .mini-charts img { width: 100%; border: 1px solid #eee; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-                .news-list { padding: 15px; background: #f9fafb; border-top: 1px solid #eee; max-height: 200px; overflow-y: auto; font-size: 0.9em; }
-                .news-item { padding: 5px 0; border-bottom: 1px solid #eee; }
-                .gif-container { text-align: center; padding: 20px; background: #fff; border-top: 1px solid #eee; }
-                .gif-img { width: 100%; border-radius: 8px; border: 1px solid #eee; } 
-            </style>
-        </head>
-        <body><div class="container">
-        <h1>INTC - Intel Corporation AI Analiz Paneli</h1>
-        <div style="background:#e6f2fa; padding:15px; border-left:4px solid #0071c5; margin-bottom:30px;">
-            <strong>Analiz Modülleri:</strong> 1. Realistic AI (7 Günlük) | 2. İstatistik (R², Sortino, Alpha) | 3. Makro Ekonomi (S&P500, NASDAQ, SOXX) | 4. Teknik & Hacim | 5. Tahmin Evrimi (GIF)
-        </div>
-        """
+# ============================================================
+# BİLİMSEL MODEL EĞİTİMİ
+# ============================================================
 
-    def add_section(self, ticker, name, metrics, chart_b64, extra_charts, news_items, gif_b64=None):
-        sig_color = metrics['signal_color']
-        sig_bg = "#dcfce7" if sig_color == "green" else "#fee2e2" if sig_color == "red" else "#eff6ff"
-        currency = "$"  # INTC ABD hissesi - Dolar
-        r2_val = metrics['r2_score']
-        r2_color = "green" if r2_val > 0.10 else "orange" if r2_val > 0.0 else "red"
-        da_val = metrics['dir_acc']
-        da_color = "green" if da_val > 55 else "orange" if da_val > 50 else "red"
-        potansiyel = (metrics['target_price'] - metrics['current_price']) / metrics['current_price'] * 100
-        pot_color = "green" if potansiyel > 0 else "red"
+def create_dataset(dataset, target_idx, lookback):
+    X, Y = [], []
+    for i in range(lookback, len(dataset)):
+        X.append(dataset[i-lookback:i])
+        Y.append(dataset[i, target_idx])
+    return np.array(X), np.array(Y)
 
-        news_html = ""
-        if news_items:
-            news_html = "<div class='news-list'><b>Son Haberler:</b><br>" + "".join([f"<div class='news-item'><span style='color:#666'>{i['date']}</span> {i['title']}</div>" for i in news_items]) + "</div>"
+def build_lstm_model(input_shape, dropout=0.3, lstm_units=64):
+    model = Sequential([
+        Input(shape=input_shape),
+        Bidirectional(LSTM(lstm_units, return_sequences=True)),
+        Dropout(dropout),
+        LSTM(lstm_units // 2),
+        Dropout(dropout),
+        Dense(16, activation='relu'),
+        Dense(1)
+    ])
+    model.compile(optimizer=Adam(learning_rate=0.001), loss=Huber())
+    return model
 
-        gif_html = ""
-        if gif_b64:
-            gif_html = f"""
-            <div class="gif-container">
-                <h3 style="color:#4b5563; margin-bottom:15px; font-size:1.1em;">Tahminlerin Zaman İçindeki Evrimi (Simülasyon)</h3>
-                <img class="gif-img" src="data:image/gif;base64,{gif_b64}" alt="Tahmin Animasyonu">
-                <div style="font-size:0.8em; color:#666; margin-top:5px;">Not: Bu animasyon modelin son 10 günde fikrini nasıl değiştirdiğini gösterir.</div>
-            </div>
-            """
+def estimate_lookback_acf(log_returns, max_lag=400, alpha=0.05):
+    if not HAS_STATSMODELS: return None
+    abs_returns = np.abs(log_returns.dropna().values)
+    if len(abs_returns) < max_lag * 2:
+        max_lag = len(abs_returns) // 4
+    try:
+        acf_values, confint = acf(abs_returns, nlags=max_lag, alpha=alpha, fft=True)
+        upper_bound = confint[:, 1] - acf_values
+        significant_lags = np.where(np.abs(acf_values[1:]) > upper_bound[1:])[0]
+        if len(significant_lags) == 0: return 60
+        last_significant = significant_lags[-1] + 1
+        return max(30, min(int(last_significant * 1.2), max_lag))
+    except: return None
 
-        self.content += f"""
-        <div class="report-section">
-            <div class="header">
-                <span>{ticker} | {name}</span>
-                <span style="background:rgba(255,255,255,0.2); padding:2px 10px; border-radius:15px; font-size:0.7em;">MEGA MODEL v9.1 - INTC Edition</span>
-            </div>
-            <div class="signal-banner" style="background:{sig_bg}; color:{sig_color};">
-                AI SİNYALİ: {metrics['signal']} <span style="font-size:0.7em; color:#555">({metrics['signal_desc']})</span>
-            </div>
-            <div class="stats-grid">
-                <div class="stat-box"><div class="stat-label">Mevcut Fiyat</div><div class="stat-val">{currency}{metrics['current_price']:.2f}</div><div class="stat-sub">Son Kapanış</div></div>
-                <div class="stat-box"><div class="stat-label">Hedef Fiyat (7G)</div><div class="stat-val">{currency}{metrics['target_price']:.2f}</div><div class="stat-sub">AI Tahmini</div></div>
-                <div class="stat-box"><div class="stat-label">Potansiyel Getiri</div><div class="stat-val" style="color:{pot_color}">%{potansiyel:.2f}</div><div class="stat-sub">Hedef Farkı</div></div>
-                <div class="stat-box"><div class="stat-label">Haber Skoru</div><div class="stat-val" style="color:{'green' if metrics['news_score']>0 else 'red'}">{metrics['news_score']:.2f}</div><div class="stat-sub">Sentiment Analizi</div></div>
+def find_optimal_lookback(data, target_idx, train_split, val_split, scaler,
+                          candidates=[60, 120, 250], epochs=12):
+    print(f"   -> Optimum lookback aranıyor: {candidates}")
+    results = {}
+    for lb in candidates:
+        if train_split <= lb + 50: continue
+        train_raw = data[:train_split]
+        train_scaled = scaler.transform(train_raw)
+        X_tr, y_tr = create_dataset(train_scaled, target_idx, lb)
+        val_inputs = data[train_split - lb : val_split]
+        val_scaled = scaler.transform(val_inputs)
+        X_v, y_v = create_dataset(val_scaled, target_idx, lb)
+        if len(X_v) < 10: continue
+        set_seeds()
+        m = Sequential([Input(shape=(X_tr.shape[1], X_tr.shape[2])), 
+                        LSTM(32), Dense(1)])
+        m.compile(optimizer=Adam(learning_rate=0.001), loss=Huber())
+        es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0)
+        hist = m.fit(X_tr, y_tr, epochs=epochs, batch_size=64,
+                     validation_data=(X_v, y_v), callbacks=[es], verbose=0)
+        best_val_loss = min(hist.history['val_loss'])
+        results[lb] = best_val_loss
+        print(f"      lookback={lb}: val_loss={best_val_loss:.5f}")
+    if not results: return 60
+    best_lb = min(results.keys(), key=lambda k: results[k])
+    print(f"   ✅ SEÇİLEN LOOKBACK: {best_lb} gün")
+    return best_lb
 
-                <div class="stat-box"><div class="stat-label">Yön Başarısı</div><div class="stat-val" style="color:{da_color}">%{metrics['dir_acc']:.1f}</div><div class="stat-sub">Yukarı/Aşağı Tahmini</div></div>
-                <div class="stat-box"><div class="stat-label">R-Kare ($R^2$)</div><div class="stat-val" style="color:{r2_color}">{metrics['r2_score']:.3f}</div><div class="stat-sub">Model Güvenilirliği</div></div>
-                <div class="stat-box"><div class="stat-label">Fiyat Doğruluğu</div><div class="stat-val">%{metrics['price_acc']:.1f}</div><div class="stat-sub">Sapma Oranı</div></div>
-                <div class="stat-box"><div class="stat-label">Yıllık Volatilite</div><div class="stat-val">%{metrics['volatility']:.1f}</div><div class="stat-sub">Risk (Oynaklık)</div></div>
+def walk_forward_cv(data, target_idx, features, lookback, n_splits=4, epochs=25):
+    """
+    BİLİMSEL: Zaman serisi için Expanding Window CV.
+    
+    KRİTİK DÜZELTME (v10.1):
+    - Her fold için AYRI scaler fit edilir (gelecek veriyi görmemek için)
+    - Yön doğruluğu ham (inverse-scaled) getiriler üzerinden hesaplanır
+    - Sıfır yakını tahminler "yatay" olarak işaretlenir, sahte isabet engellenir
+    """
+    print(f"\n   📊 Walk-Forward CV (n_splits={n_splits}):")
+    n = len(data)
+    fold_size = n // (n_splits + 1)
+    n_features = len(features)
+    
+    cv_scores = []
+    for fold in range(n_splits):
+        train_end = fold_size * (fold + 1)
+        val_end = fold_size * (fold + 2)
+        if val_end > n - lookback: break
+        
+        # 🔧 DÜZELTME 1: Her fold için yeni scaler (gelecek veri sızıntısı yok)
+        fold_scaler = MinMaxScaler((0, 1))
+        train_raw = data[:train_end]
+        fold_scaler.fit(train_raw)
+        
+        train_sc = fold_scaler.transform(train_raw)
+        X_tr, y_tr = create_dataset(train_sc, target_idx, lookback)
+        
+        val_inputs = data[train_end - lookback : val_end]
+        val_sc = fold_scaler.transform(val_inputs)
+        X_v, y_v = create_dataset(val_sc, target_idx, lookback)
+        
+        if len(X_tr) < 100 or len(X_v) < 10: continue
+        
+        set_seeds(seed=42 + fold)
+        m = build_lstm_model((X_tr.shape[1], X_tr.shape[2]))
+        es = EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=0)
+        m.fit(X_tr, y_tr, epochs=epochs, batch_size=32, 
+              validation_data=(X_v, y_v), callbacks=[es], verbose=0)
+        
+        pred_scaled = m.predict(X_v, verbose=0).flatten()
+        mse = mean_squared_error(y_v, pred_scaled)
+        try: r2 = r2_score(y_v, pred_scaled)
+        except: r2 = -1
+        
+        # 🔧 DÜZELTME 2: Yön doğruluğunu HAM (inverse-scaled) değerlerde hesapla
+        dummy_pred = np.zeros((len(pred_scaled), n_features))
+        dummy_pred[:, target_idx] = pred_scaled
+        pred_real = fold_scaler.inverse_transform(dummy_pred)[:, target_idx]
+        
+        dummy_actual = np.zeros((len(y_v), n_features))
+        dummy_actual[:, target_idx] = y_v
+        actual_real = fold_scaler.inverse_transform(dummy_actual)[:, target_idx]
+        
+        # 🔧 DÜZELTME 3: Sıfıra çok yakın tahminleri "yatay" say (yapay isabet engelle)
+        # Threshold = günlük volatilitenin %10'u
+        threshold = np.std(actual_real) * 0.1
+        pred_signs = np.where(np.abs(pred_real) < threshold, 0, np.sign(pred_real))
+        actual_signs = np.where(np.abs(actual_real) < threshold, 0, np.sign(actual_real))
+        
+        # Sadece her ikisi de "yataylik degil" oldugunda yon karsilastir
+        non_flat_mask = (pred_signs != 0) & (actual_signs != 0)
+        if non_flat_mask.sum() > 0:
+            dir_acc = np.mean(pred_signs[non_flat_mask] == actual_signs[non_flat_mask]) * 100
+        else:
+            dir_acc = 50.0  # belirsiz durum
+        
+        cv_scores.append({'fold': fold+1, 'mse': mse, 'r2': r2, 'dir_acc': dir_acc, 
+                         'n_compared': int(non_flat_mask.sum()), 'n_total': len(pred_real)})
+        print(f"      Fold {fold+1}: MSE={mse:.5f} | R²={r2:.4f} | Dir.Acc={dir_acc:.1f}% ({non_flat_mask.sum()}/{len(pred_real)} karsilastirildi)")
+    
+    if not cv_scores: return None
+    avg_r2 = np.mean([s['r2'] for s in cv_scores])
+    avg_dir = np.mean([s['dir_acc'] for s in cv_scores])
+    std_dir = np.std([s['dir_acc'] for s in cv_scores])
+    print(f"   📈 CV Ortalaması: R²={avg_r2:.4f} | Dir.Acc={avg_dir:.1f}% (±{std_dir:.1f}%)")
+    return {'avg_r2': avg_r2, 'avg_dir_acc': avg_dir, 'std_dir_acc': std_dir, 'folds': cv_scores}
 
-                <div class="stat-box"><div class="stat-label">Alpha (Yıllık)</div><div class="stat-val" style="color:{'green' if metrics['alpha']>0 else 'red'}">{metrics['alpha']:.2f}</div><div class="stat-sub">Endeks Üstü Getiri</div></div>
-                 <div class="stat-box"><div class="stat-label">Beta ({metrics['bench_name']})</div><div class="stat-val">{metrics['beta']:.2f}</div><div class="stat-sub">Piyasa Hassasiyeti</div></div>
-                <div class="stat-box"><div class="stat-label">Sharpe Oranı</div><div class="stat-val">{metrics['sharpe']:.2f}</div><div class="stat-sub">Risk/Getiri Dengesi</div></div>
-                <div class="stat-box"><div class="stat-label">Sortino Oranı</div><div class="stat-val">{metrics['sortino']:.2f}</div><div class="stat-sub">Negatif Risk Getirisi</div></div>
+def train_ensemble(X_train, y_train, X_val, y_val, n_models=3, epochs=80):
+    """3 farklı seed ile 3 model - varyans azaltma"""
+    print(f"\n   🎯 Ensemble eğitiliyor ({n_models} model)...")
+    models = []
+    for i in range(n_models):
+        set_seeds(seed=42 + i*10)
+        m = build_lstm_model((X_train.shape[1], X_train.shape[2]))
+        es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=0)
+        rlr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=0)
+        h = m.fit(X_train, y_train, epochs=epochs, batch_size=32,
+                  validation_data=(X_val, y_val), callbacks=[es, rlr], verbose=0)
+        best_val = min(h.history['val_loss'])
+        print(f"      Model {i+1}: epochs={len(h.history['loss'])} | best_val_loss={best_val:.5f}")
+        models.append(m)
+    return models
 
-                <div class="stat-box"><div class="stat-label">Calmar Oranı</div><div class="stat-val">{metrics['calmar']:.2f}</div><div class="stat-sub">Getiri / Max Risk</div></div>
-                <div class="stat-box"><div class="stat-label">Max Drawdown</div><div class="stat-val" style="color:red">%{metrics['mdd']:.1f}</div><div class="stat-sub">En Büyük Düşüş</div></div>
-                <div class="stat-box" style="background:#f9fafb;"><div class="stat-label">-</div><div class="stat-val">-</div></div>
-                <div class="stat-box" style="background:#f9fafb;"><div class="stat-label">-</div><div class="stat-val">-</div></div>
-            </div>
-            <div class="chart-area"><img class="main-chart" src="data:image/png;base64,{chart_b64}"></div>
-            {gif_html}
-            <div class="mini-charts">
-                <img src="data:image/png;base64,{extra_charts['rsi']}">
-                <img src="data:image/png;base64,{extra_charts['macd']}">
-                <img src="data:image/png;base64,{extra_charts['bollinger']}">
-                <img src="data:image/png;base64,{extra_charts['reg_channel']}">
-                <img src="data:image/png;base64,{extra_charts['drawdown']}">
-                <img src="data:image/png;base64,{extra_charts['volatility']}">
-                <img src="data:image/png;base64,{extra_charts['volume']}">
-                <img src="data:image/png;base64,{extra_charts['ma_cross']}">
-                <img src="data:image/png;base64,{extra_charts['heatmap']}">
-            </div>
-            {news_html}
-        </div>
-        """
+def ensemble_predict(models, X):
+    preds = np.array([m.predict(X, verbose=0).flatten() for m in models])
+    return preds.mean(axis=0), preds.std(axis=0)
 
-    def save(self):
-        self.content += "</div></body></html>"
-        with open("INTC_Analiz.html", "w", encoding="utf-8") as f:
-            f.write(self.content)
+# --- BASELINE MODELLER ---
+def baseline_naive(y_test):
+    """Naive: yarın bugünle aynı (log return = 0)"""
+    return np.zeros(len(y_test))
+
+def baseline_mean(y_train, y_test):
+    return np.full(len(y_test), np.mean(y_train))
+
+def baseline_random_walk(y_train, y_test):
+    """RW: önceki getiri = sonraki getiri tahmini"""
+    if len(y_test) == 0: return np.array([])
+    pred = np.zeros(len(y_test))
+    pred[0] = y_train[-1] if len(y_train) > 0 else 0
+    pred[1:] = y_test[:-1]
+    return pred
+
+def diebold_mariano_test(actual, pred1, pred2):
+    """
+    H0: İki model aynı tahmin gücüne sahip
+    p < 0.05 ise modeller arasında ANLAMLI fark var
+    """
+    actual = np.array(actual)
+    pred1 = np.array(pred1)
+    pred2 = np.array(pred2)
+    e1 = actual - pred1
+    e2 = actual - pred2
+    d = e1**2 - e2**2
+    n = len(d)
+    if n < 10: return 0, 1.0
+    mean_d = np.mean(d)
+    var_d = np.var(d, ddof=1)
+    if var_d == 0: return 0, 1.0
+    dm_stat = mean_d / np.sqrt(var_d / n)
+    p_value = 2 * (1 - stats.norm.cdf(np.abs(dm_stat)))
+    return dm_stat, p_value
+
+# ============================================================
+# MULTİ-STEP TAHMİN (15 GÜN) + Confidence Interval
+# ============================================================
+def multi_step_forecast(models, last_batch_scaled, scaler, features, target_idx, 
+                         current_price, n_steps=15):
+    n_features = len(features)
+    future_prices = []
+    future_lower = []
+    future_upper = []
+    temp_batch = last_batch_scaled.copy()
+    curr_p = current_price
+    
+    for step in range(n_steps):
+        preds_scaled = np.array([m.predict(temp_batch, verbose=0)[0,0] for m in models])
+        mean_pred_sc = preds_scaled.mean()
+        std_pred_sc = preds_scaled.std()
+        
+        # Adım sayısı arttıkça belirsizlik artmalı (sqrt of time)
+        time_uncertainty = np.sqrt(step + 1)
+        
+        d_mean = np.zeros((1, n_features)); d_mean[0, target_idx] = mean_pred_sc
+        mean_ret = scaler.inverse_transform(d_mean)[0, target_idx]
+        
+        d_low = np.zeros((1, n_features))
+        d_low[0, target_idx] = mean_pred_sc - 1.96 * std_pred_sc * time_uncertainty
+        low_ret = scaler.inverse_transform(d_low)[0, target_idx]
+        
+        d_high = np.zeros((1, n_features))
+        d_high[0, target_idx] = mean_pred_sc + 1.96 * std_pred_sc * time_uncertainty
+        high_ret = scaler.inverse_transform(d_high)[0, target_idx]
+        
+        future_prices.append(curr_p * np.exp(mean_ret))
+        future_lower.append(curr_p * np.exp(low_ret))
+        future_upper.append(curr_p * np.exp(high_ret))
+        
+        curr_p = future_prices[-1]
+        
+        new_row = temp_batch[0, -1, :].copy()
+        new_row[target_idx] = mean_pred_sc
+        temp_batch = np.append(temp_batch[:, 1:, :], new_row.reshape(1,1,n_features), axis=1)
+    
+    return np.array(future_prices), np.array(future_lower), np.array(future_upper)
+
+# ============================================================
+# BACKTEST
+# ============================================================
+def backtest_strategy(actual_prices, predicted_returns, threshold=0.001):
+    if len(predicted_returns) < 2: return None
+    actual_returns = np.diff(np.log(actual_prices))
+    n = min(len(predicted_returns), len(actual_returns))
+    
+    positions = np.where(predicted_returns[:n] > threshold, 1, 
+                        np.where(predicted_returns[:n] < -threshold, -1, 0))
+    strategy_returns = positions * actual_returns[:n]
+    
+    metrics = calculate_real_metrics(strategy_returns)
+    bh_metrics = calculate_real_metrics(actual_returns[:n])
+    
+    return {
+        'strategy': metrics, 'buy_hold': bh_metrics,
+        'strategy_returns': strategy_returns,
+        'n_trades': int(np.sum(np.abs(np.diff(positions)) > 0)),
+        'pct_in_market': float(np.mean(positions != 0) * 100)
+    }
+
+# ============================================================
+# GRAFİKLER
+# ============================================================
+def plot_main_chart(df, val_split, test_dates, rec_prices, fut_dates, 
+                    future_prices, future_lower, future_upper, sig_color, name, ticker):
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    ax.plot(df.index[-200:], df['Close'].iloc[-200:], 
+            label="Gerçek Fiyat", color="#1f2937", linewidth=1.8)
+    
+    if test_dates is not None and rec_prices is not None and len(test_dates) > 0:
+        ax.plot(test_dates, rec_prices, 
+                label="Model Test (OOS)", linestyle="--", color="#f59e0b", linewidth=1.5, alpha=0.8)
+    
+    ax.plot(fut_dates, future_prices, label=f"{PREDICTION_HORIZON} Günlük Tahmin", 
+            color=sig_color, linewidth=2.5, marker='o', markersize=5,
+            markerfacecolor=sig_color, markeredgewidth=0, zorder=10)
+    
+    ax.fill_between(fut_dates, future_lower, future_upper, 
+                     color=sig_color, alpha=0.15, label="95% Güven Aralığı")
+    
+    ax.axhline(y=df['Close'].iloc[-1], color='gray', linestyle=':', alpha=0.5)
+    
+    ax.set_title(f"{name} ({ticker}) - {PREDICTION_HORIZON} Günlük Fiyat Tahmini (Ensemble + CI)",
+                 fontsize=13, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=10)
+    ax.grid(True, alpha=0.2)
+    ax.set_xlabel("Tarih")
+    ax.set_ylabel("Fiyat ($)")
+    
+    buf = BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+    buf.seek(0)
+    plt.close(fig)
+    return base64.b64encode(buf.read()).decode('utf-8')
 
 def plot_regression_channel(df):
     data = df['Close'].tail(90).values
@@ -639,56 +608,49 @@ def plot_regression_channel(df):
     slope, intercept, _, _, _ = stats.linregress(x, data)
     reg_line = slope * x + intercept
     std = np.std(data - reg_line)
-    fig, ax = plt.subplots(figsize=(5,3))
+    fig, ax = plt.subplots(figsize=(5, 3))
     ax.plot(x, data, color='black', label='Fiyat')
     ax.plot(x, reg_line, color='blue', linestyle='--', label='Trend')
-    ax.fill_between(x, reg_line - 2*std, reg_line + 2*std, color='blue', alpha=0.1, label='+-2SD')
-    ax.set_title("Regresyon Kanalı", fontsize=10)
-    ax.grid(alpha=0.2)
+    ax.fill_between(x, reg_line - 2*std, reg_line + 2*std, color='blue', alpha=0.1)
+    ax.set_title("Regresyon Kanalı", fontsize=10); ax.grid(alpha=0.2)
     buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
     return base64.b64encode(buf.read()).decode('utf-8')
 
 def plot_drawdown(df):
     data = df['Close'].tail(180)
     rolling_max = data.cummax()
-    drawdown = (data - rolling_max) / rolling_max
-    fig, ax = plt.subplots(figsize=(5,3))
-    ax.fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3)
-    ax.plot(drawdown.index, drawdown, color='red', linewidth=1)
-    ax.set_title("Max Drawdown", fontsize=10)
-    ax.grid(alpha=0.2)
+    dd = (data - rolling_max) / rolling_max
+    fig, ax = plt.subplots(figsize=(5, 3))
+    ax.fill_between(dd.index, dd, 0, color='red', alpha=0.3)
+    ax.plot(dd.index, dd, color='red', linewidth=1)
+    ax.set_title("Max Drawdown", fontsize=10); ax.grid(alpha=0.2)
     buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
     return base64.b64encode(buf.read()).decode('utf-8')
 
-def plot_volatility_cone(df):
-    atr = df['ATR'].tail(60)
-    fig, ax = plt.subplots(figsize=(5,3))
-    ax.plot(atr.index, atr, color='orange', linewidth=2)
-    ax.set_title("Volatilite (ATR)", fontsize=10)
-    ax.grid(alpha=0.2)
+def plot_volatility(df):
+    fig, ax = plt.subplots(figsize=(5, 3))
+    ax.plot(df.index[-60:], df['ATR'].tail(60), color='orange', linewidth=2)
+    ax.set_title("Volatilite (ATR)", fontsize=10); ax.grid(alpha=0.2)
     buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
     return base64.b64encode(buf.read()).decode('utf-8')
 
-def plot_volume_osc(df):
-    vol = df['Volume'].tail(60)
-    close = df['Close'].tail(60)
-    fig, ax1 = plt.subplots(figsize=(5,3))
+def plot_volume(df):
+    vol = df['Volume'].tail(60); close = df['Close'].tail(60)
+    fig, ax1 = plt.subplots(figsize=(5, 3))
     ax1.bar(vol.index, vol, color='gray', alpha=0.3)
     ax2 = ax1.twinx()
     ax2.plot(close.index, close, color='blue', linewidth=1)
     ax1.set_title("Hacim", fontsize=10)
-    ax1.grid(False); ax2.grid(False)
     buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
     return base64.b64encode(buf.read()).decode('utf-8')
 
 def plot_ma_cross(df):
     data = df.tail(180)
-    fig, ax = plt.subplots(figsize=(5,3))
+    fig, ax = plt.subplots(figsize=(5, 3))
     ax.plot(data.index, data['Close'], color='black', alpha=0.5, linewidth=1)
-    ax.plot(data.index, data['SMA50'], color='green', linewidth=1.5)
-    ax.plot(data.index, data['SMA200'], color='red', linewidth=1.5)
-    ax.set_title("SMA 50/200", fontsize=10)
-    ax.grid(alpha=0.2)
+    ax.plot(data.index, data['SMA50'], color='green', linewidth=1.5, label='SMA50')
+    ax.plot(data.index, data['SMA200'], color='red', linewidth=1.5, label='SMA200')
+    ax.set_title("SMA 50/200", fontsize=10); ax.grid(alpha=0.2); ax.legend(fontsize=7)
     buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
     return base64.b64encode(buf.read()).decode('utf-8')
 
@@ -698,456 +660,391 @@ def plot_heatmap(df):
     monthly_ret['Year'] = monthly_ret.index.year
     monthly_ret['Month'] = monthly_ret.index.month
     pivot = monthly_ret.pivot(index='Year', columns='Month', values='Return').tail(5)
-    fig, ax = plt.subplots(figsize=(5,3))
-    sns.heatmap(pivot, annot=True, fmt=".1f", cmap="RdYlGn", center=0, cbar=False, annot_kws={"size": 7}, ax=ax)
-    ax.set_title("Mevsimsellik", fontsize=10)
-    ax.set_ylabel(''); ax.set_xlabel('')
+    fig, ax = plt.subplots(figsize=(5, 3))
+    sns.heatmap(pivot, annot=True, fmt=".1f", cmap="RdYlGn", center=0, cbar=False,
+                annot_kws={"size": 7}, ax=ax)
+    ax.set_title("Mevsimsellik", fontsize=10); ax.set_ylabel(''); ax.set_xlabel('')
+    buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
+    return base64.b64encode(buf.read()).decode('utf-8')
+
+def plot_cv_scores(cv_results):
+    if cv_results is None: return None
+    folds = [s['fold'] for s in cv_results['folds']]
+    r2_scores = [s['r2'] for s in cv_results['folds']]
+    dir_accs = [s['dir_acc'] for s in cv_results['folds']]
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+    ax1.bar(folds, r2_scores, color='steelblue', alpha=0.7)
+    ax1.set_xlabel('Fold'); ax1.set_ylabel('R²', color='steelblue')
+    ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    ax2 = ax1.twinx()
+    ax2.plot(folds, dir_accs, color='red', marker='o', linewidth=2)
+    ax2.set_ylabel('Yön %', color='red')
+    ax2.axhline(y=50, color='red', linestyle='--', alpha=0.3)
+    ax1.set_title("Walk-Forward CV", fontsize=10); ax1.grid(alpha=0.2)
     buf = BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close(fig)
     return base64.b64encode(buf.read()).decode('utf-8')
 
 def mini_plot(d, c, t):
-    f, a = plt.subplots(figsize=(5,3)); a.plot(d[-60:], color=c); a.set_title(t, fontsize=10); a.grid(alpha=0.2)
+    f, a = plt.subplots(figsize=(5, 3))
+    a.plot(d[-60:], color=c); a.set_title(t, fontsize=10); a.grid(alpha=0.2)
     b = BytesIO(); f.savefig(b, format='png', bbox_inches='tight'); b.seek(0); plt.close(f)
     return base64.b64encode(b.read()).decode('utf-8')
 
-# --- BİLİMSEL LOOKBACK OPTİMİZASYONU ---
-def estimate_lookback_acf(log_returns, max_lag=500, alpha=0.05):
-    """
-    ACF (Autocorrelation Function) ile başlangıç lookback tahmini.
-    Anlamlı korelasyonun bittiği son lag + güvenlik payı dönülür.
-    
-    Finansal getiriler genelde düşük otokorelasyona sahiptir, bu yüzden
-    ABSOLUTE returns (volatilite kümelenmesi) daha bilgilendirici olur.
-    """
-    if not HAS_STATSMODELS:
-        return None
-    
-    # Volatilite kümelenmesi için mutlak getiriler (ARCH etkisi)
-    abs_returns = np.abs(log_returns.dropna().values)
-    
-    if len(abs_returns) < max_lag * 2:
-        max_lag = len(abs_returns) // 4
-    
-    try:
-        acf_values, confint = acf(abs_returns, nlags=max_lag, alpha=alpha, fft=True)
-        # Güven aralığının üst sınırı (anlamlılık eşiği)
-        upper_bound = confint[:, 1] - acf_values  # bootstrap CI
-        
-        # ACF değerinin güven aralığından çıktığı son lag
-        significant_lags = np.where(np.abs(acf_values[1:]) > upper_bound[1:])[0]
-        
-        if len(significant_lags) == 0:
-            return 60  # default
-        
-        # Anlamlı son lag + %20 güvenlik payı
-        last_significant = significant_lags[-1] + 1
-        suggested = int(last_significant * 1.2)
-        return max(30, min(suggested, max_lag))
-    except Exception as e:
-        print(f"   ACF hesaplama hatası: {e}")
-        return None
+def generate_signal(current_price, predicted_price, atr_value):
+    expected_change = predicted_price - current_price
+    threshold = atr_value * 0.5
+    if expected_change > threshold: return "GÜÇLÜ AL", "green", "Pozitif Trend"
+    elif expected_change > 0: return "AL / TUT", "blue", "Zayıf Yükseliş"
+    elif expected_change < -threshold: return "SAT", "red", "Negatif Trend"
+    else: return "NÖTR", "gray", "Yatay Seyir"
 
+# ============================================================
+# HTML RAPOR
+# ============================================================
+class HTMLRapor:
+    def __init__(self):
+        self.content = """
+<!DOCTYPE html>
+<html lang="tr"><head><meta charset="UTF-8">
+<title>INTC - Bilimsel AI Analiz Paneli v10</title>
+<style>
+body { font-family: 'Segoe UI', sans-serif; background: #f3f4f6; padding: 20px; }
+.container { max-width: 1200px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+h1 { text-align: center; color: #111827; border-bottom: 3px solid #0071c5; padding-bottom: 15px; }
+.section { margin-bottom: 40px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; background: #fff; }
+.header { background: #0071c5; color: white; padding: 15px 25px; font-size: 1.4em; font-weight: 600; display: flex; justify-content: space-between; }
+.signal { padding: 18px; text-align: center; font-weight: bold; font-size: 1.2em; letter-spacing: 1px; }
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #e5e7eb; }
+.stat-box { background: #fff; padding: 15px; text-align: center; height: 110px; display: flex; flex-direction: column; justify-content: center; }
+.stat-label { font-size: 0.78em; color: #6b7280; font-weight: 700; text-transform: uppercase; margin-bottom: 5px; }
+.stat-val { font-size: 1.3em; font-weight: 800; color: #111827; }
+.stat-sub { font-size: 0.7em; color: #9ca3af; }
+.chart-area { padding: 20px; text-align: center; background: #f9fafb; }
+.main-chart { width: 100%; border-radius: 8px; border: 1px solid #eee; }
+.mini-charts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; padding: 15px; }
+.mini-charts img { width: 100%; border: 1px solid #eee; border-radius: 4px; }
+.news-list { padding: 15px; background: #f9fafb; border-top: 1px solid #eee; max-height: 200px; overflow-y: auto; font-size: 0.9em; }
+.news-item { padding: 5px 0; border-bottom: 1px solid #eee; }
+.science-box { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 20px; border-radius: 4px; }
+.science-box h3 { margin: 0 0 8px 0; color: #92400e; font-size: 1em; }
+.science-box table { width: 100%; font-size: 0.9em; }
+.science-box td { padding: 4px 8px; }
+.warn { color: #b91c1c; font-weight: bold; }
+.good { color: #15803d; font-weight: bold; }
+.neutral { color: #6b7280; font-weight: bold; }
+</style></head>
+<body><div class="container">
+<h1>INTC - Intel Corporation - Bilimsel AI Analiz</h1>
+<div style="background:#e6f2fa; padding:15px; border-left:4px solid #0071c5; margin-bottom:30px;">
+<strong>v10.0 Bilimsel Modüller:</strong> Walk-Forward CV | Ensemble (3 model) | Diebold-Mariano testi | 95% Güven Aralığı | Backtest tabanlı Sharpe | Naive baseline karşılaştırması
+</div>
+"""
+    
+    def add_section(self, ticker, name, m, chart_b64, extras, news_items, science_html):
+        sig_color = m['signal_color']
+        sig_bg = "#dcfce7" if sig_color == "green" else "#fee2e2" if sig_color == "red" else "#eff6ff"
+        currency = "$"
+        r2 = m['cv_r2']
+        r2_class = "good" if r2 > 0.05 else "warn" if r2 < -0.05 else "neutral"
+        da = m['cv_dir_acc']
+        da_class = "good" if da > 53 else "warn" if da < 47 else "neutral"
+        pot = (m['target_price'] - m['current_price']) / m['current_price'] * 100
+        pot_class = "good" if pot > 0 else "warn"
+        
+        news_html = ""
+        if news_items:
+            news_html = "<div class='news-list'><b>Son Haberler:</b><br>" + "".join(
+                [f"<div class='news-item'><span style='color:#666'>{i['date']}</span> {i['title']}</div>" 
+                 for i in news_items]) + "</div>"
+        
+        self.content += f"""
+<div class="section">
+<div class="header">
+<span>{ticker} | {name}</span>
+<span style="background:rgba(255,255,255,0.2); padding:2px 10px; border-radius:15px; font-size:0.7em;">v10 BİLİMSEL</span>
+</div>
+<div class="signal" style="background:{sig_bg}; color:{sig_color};">
+AI SİNYALİ: {m['signal']} <span style="font-size:0.7em; color:#555">({m['signal_desc']}) | Hedef: {PREDICTION_HORIZON} gün</span>
+</div>
 
-def find_optimal_lookback(data, features, target_idx, train_split, val_split, scaler,
-                           candidate_lookbacks=[60, 120, 250, 500],
-                           epochs=20, verbose=True):
-    """
-    Walk-forward grid search: Aday lookback değerlerini validation setinde dener.
-    En düşük val_loss'u veren lookback seçilir.
-    
-    HIZLANDIRMA: Her aday için sadece 20 epoch eğitilir (tam eğitim değil).
-    Bu, hangi lookback'in daha iyi öğrendiğini gösterir.
-    """
-    if verbose:
-        print(f"   -> Optimum lookback aranıyor: {candidate_lookbacks}")
-    
-    results = {}
-    
-    for lb in candidate_lookbacks:
-        # Yetersiz veri kontrolü
-        if train_split <= lb + 50:
-            if verbose:
-                print(f"      lookback={lb}: yetersiz train verisi, atlandı")
-            continue
-        
-        # Veri hazırlama
-        train_raw = data[:train_split]
-        train_scaled = scaler.transform(train_raw)
-        
-        X_tr, y_tr = [], []
-        for i in range(lb, len(train_scaled)):
-            X_tr.append(train_scaled[i-lb:i])
-            y_tr.append(train_scaled[i, target_idx])
-        X_tr, y_tr = np.array(X_tr), np.array(y_tr)
-        
-        val_inputs = data[train_split - lb : val_split]
-        val_scaled = scaler.transform(val_inputs)
-        X_v, y_v = [], []
-        for i in range(lb, len(val_scaled)):
-            X_v.append(val_scaled[i-lb:i])
-            y_v.append(val_scaled[i, target_idx])
-        X_v, y_v = np.array(X_v), np.array(y_v)
-        
-        if len(X_v) < 10:
-            continue
-        
-        # Hızlı eğitim için küçük model
-        set_seeds()
-        m = Sequential([
-            Input(shape=(X_tr.shape[1], X_tr.shape[2])),
-            LSTM(32),
-            Dense(1)
-        ])
-        m.compile(optimizer=Adam(learning_rate=0.001), loss=Huber())
-        
-        es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0)
-        
-        hist = m.fit(X_tr, y_tr, epochs=epochs, batch_size=64,
-                     validation_data=(X_v, y_v), callbacks=[es], verbose=0)
-        
-        # Val R² hesabı
-        pred_v = m.predict(X_v, verbose=0).flatten()
-        try:
-            r2_v = r2_score(y_v, pred_v)
-        except:
-            r2_v = -1.0
-        
-        best_val_loss = min(hist.history['val_loss'])
-        results[lb] = {'val_loss': best_val_loss, 'r2': r2_v, 'epochs': len(hist.history['loss'])}
-        
-        if verbose:
-            print(f"      lookback={lb}: val_loss={best_val_loss:.5f} | val_R²={r2_v:.4f} | epochs={len(hist.history['loss'])}")
-    
-    if not results:
-        return 60  # fallback
-    
-    # En düşük val_loss kazanır (R² yerine loss daha güvenilir, çünkü R² negatif olabilir)
-    best_lb = min(results.keys(), key=lambda k: results[k]['val_loss'])
-    
-    if verbose:
-        print(f"   ✅ SEÇİLEN LOOKBACK: {best_lb} gün (val_loss={results[best_lb]['val_loss']:.5f})")
-    
-    return best_lb
+{science_html}
 
+<div class="stats-grid">
+<div class="stat-box"><div class="stat-label">Mevcut Fiyat</div><div class="stat-val">{currency}{m['current_price']:.2f}</div><div class="stat-sub">Son Kapanış</div></div>
+<div class="stat-box"><div class="stat-label">Hedef Fiyat ({PREDICTION_HORIZON}G)</div><div class="stat-val">{currency}{m['target_price']:.2f}</div><div class="stat-sub">Ensemble Tahmin</div></div>
+<div class="stat-box"><div class="stat-label">Potansiyel</div><div class="stat-val {pot_class}">%{pot:+.2f}</div><div class="stat-sub">Hedef Farkı</div></div>
+<div class="stat-box"><div class="stat-label">95% Güven Aralığı</div><div class="stat-val" style="font-size:0.95em">${m['ci_low']:.2f}-${m['ci_high']:.2f}</div><div class="stat-sub">Belirsizlik</div></div>
 
-# --- ANALİZ ÇEKİRDEĞİ ---
-def analyze_ticker(ticker, info, macro_df):
+<div class="stat-box"><div class="stat-label">CV Yön Doğruluğu</div><div class="stat-val {da_class}">%{m['cv_dir_acc']:.1f}</div><div class="stat-sub">±{m['cv_std_dir']:.1f}% (4 fold)</div></div>
+<div class="stat-box"><div class="stat-label">CV R²</div><div class="stat-val {r2_class}">{m['cv_r2']:.4f}</div><div class="stat-sub">Walk-Forward</div></div>
+<div class="stat-box"><div class="stat-label">Test Yön Doğruluğu</div><div class="stat-val">%{m['test_dir_acc']:.1f}</div><div class="stat-sub">Out-of-Sample</div></div>
+<div class="stat-box"><div class="stat-label">Test R²</div><div class="stat-val">{m['test_r2']:.4f}</div><div class="stat-sub">Out-of-Sample</div></div>
+
+<div class="stat-box"><div class="stat-label">Strateji Sharpe</div><div class="stat-val">{m['bt_sharpe']:.2f}</div><div class="stat-sub">Backtest</div></div>
+<div class="stat-box"><div class="stat-label">Buy&Hold Sharpe</div><div class="stat-val">{m['bh_sharpe']:.2f}</div><div class="stat-sub">Karşılaştırma</div></div>
+<div class="stat-box"><div class="stat-label">Alpha (Yıllık)</div><div class="stat-val">{m['alpha']:+.2f}</div><div class="stat-sub">vs S&P 500</div></div>
+<div class="stat-box"><div class="stat-label">Beta</div><div class="stat-val">{m['beta']:.2f}</div><div class="stat-sub">S&P 500'e Karşı</div></div>
+
+<div class="stat-box"><div class="stat-label">Volatilite (yıllık)</div><div class="stat-val">%{m['volatility']:.1f}</div><div class="stat-sub">Gerçek</div></div>
+<div class="stat-box"><div class="stat-label">Max Drawdown</div><div class="stat-val warn">%{m['mdd']:.1f}</div><div class="stat-sub">Tarihsel</div></div>
+<div class="stat-box"><div class="stat-label">Lookback</div><div class="stat-val">{m['lookback']}g</div><div class="stat-sub">Bilimsel Seçim</div></div>
+<div class="stat-box"><div class="stat-label">Haber Skoru</div><div class="stat-val" style="color:{'green' if m['news_score']>0 else 'red' if m['news_score']<0 else 'gray'}">{m['news_score']:+.2f}</div><div class="stat-sub">Sentiment</div></div>
+</div>
+
+<div class="chart-area"><img class="main-chart" src="data:image/png;base64,{chart_b64}"></div>
+
+<div class="mini-charts">
+<img src="data:image/png;base64,{extras['rsi']}">
+<img src="data:image/png;base64,{extras['macd']}">
+<img src="data:image/png;base64,{extras['cv']}">
+<img src="data:image/png;base64,{extras['reg_channel']}">
+<img src="data:image/png;base64,{extras['drawdown']}">
+<img src="data:image/png;base64,{extras['volatility']}">
+<img src="data:image/png;base64,{extras['volume']}">
+<img src="data:image/png;base64,{extras['ma_cross']}">
+<img src="data:image/png;base64,{extras['heatmap']}">
+</div>
+
+{news_html}
+</div>
+"""
+    
+    def save(self):
+        self.content += "</div></body></html>"
+        with open("INTC_Analiz.html", "w", encoding="utf-8") as f:
+            f.write(self.content)
+
+# ============================================================
+# ANA ANALİZ
+# ============================================================
+def analyze():
     set_seeds()
-    name = info['name']
-    asset_type = info['type']
-
-    # INTC için benchmark: S&P 500 (^GSPC)
-    # Alternatif: NASDAQ (^IXIC) veya SOXX (Yarı iletken ETF)
-    if asset_type == 'us_stock': 
-        bench_symbol, bench_name = '^GSPC', 'S&P 500'
-    else: 
-        bench_symbol, bench_name = '^GSPC', 'S&P 500'
-
-    market_returns = get_benchmark_data(bench_symbol)
-    if market_returns is None: return None
-
-    df = get_stock_data(ticker, macro_df)
-    if df is None: return None
-
+    print("="*65)
+    print(f"INTC BİLİMSEL AI ANALİZ v10.0 ({PREDICTION_HORIZON} GÜN TAHMİN)")
+    print("="*65)
+    
+    print("\n1. Makro veriler indiriliyor...")
+    macro_df = get_macro_data()
+    
+    print("\n2. Benchmark (S&P 500) indiriliyor...")
+    market_returns = get_benchmark_data('^GSPC')
+    
+    print(f"\n3. {TICKER} verisi indiriliyor + indikatorler hesaplaniyor...")
+    df = get_stock_data(TICKER, macro_df)
+    if df is None:
+        print("HATA: Veri alinamadi")
+        return
+    print(f"   Toplam {len(df)} islem gunu ({df.index[0].date()} - {df.index[-1].date()})")
+    
+    print(f"\n4. Sentiment analizi...")
+    news_score, news_items = get_advanced_sentiment(TICKER)
+    print(f"   Haber skoru: {news_score:+.3f} ({len(news_items)} haber)")
+    
     exclude_cols = ['Open', 'High', 'Low', 'Volume', 'Close', 'Adj Close']
     features = ['Close'] + [c for c in df.columns if c not in exclude_cols]
-
     target_idx = features.index('Log_Ret')
     data = df[features].values
-
+    
     train_split = int(len(df) * 0.80)
     val_split = int(len(df) * 0.90)
-    train_raw = data[:train_split]
-
-    scaler = MinMaxScaler((0,1))
-    scaler.fit(train_raw)
-    train_scaled = scaler.transform(train_raw)
-
-    # ============================================================
-    # BİLİMSEL LOOKBACK SEÇİMİ
-    # 1. ACF ile başlangıç tahmini (volatilite kümelenmesi)
-    # 2. Grid search ile validation setinde en iyi lookback bulunur
-    # ============================================================
     
-    # Adım 1: ACF tabanlı hint
+    scaler = MinMaxScaler((0, 1))
+    scaler.fit(data[:train_split])
+    
+    print(f"\n5. Bilimsel lookback secimi:")
     log_ret_train = df['Log_Ret'].iloc[:train_split]
-    acf_hint = estimate_lookback_acf(log_ret_train, max_lag=500)
-    if acf_hint:
-        print(f"   -> ACF analizi öneriyor: ~{acf_hint} gün")
-    
-    # Adım 2: Grid search adayları (ACF hint'ini de dahil et)
-    candidates = sorted(set([60, 120, 250, 500] + ([acf_hint] if acf_hint else [])))
-    # Veriye göre filtrele
+    acf_hint = estimate_lookback_acf(log_ret_train)
+    if acf_hint: print(f"   ACF analizi: ~{acf_hint} gun")
+    candidates = sorted(set([60, 120, 250] + ([acf_hint] if acf_hint else [])))
     candidates = [c for c in candidates if c < train_split - 100]
+    lookback = find_optimal_lookback(data, target_idx, train_split, val_split, scaler, 
+                                     candidates=candidates, epochs=12)
     
-    lookback = find_optimal_lookback(
-        data=data, features=features, target_idx=target_idx,
-        train_split=train_split, val_split=val_split, scaler=scaler,
-        candidate_lookbacks=candidates,
-        epochs=20  # hızlı arama için
-    )
-
-    def create_dataset(dataset, lb=60):
-        X, Y = [], []
-        for i in range(lb, len(dataset)):
-            X.append(dataset[i-lb:i])
-            Y.append(dataset[i, target_idx])
-        return np.array(X), np.array(Y)
-
-    X_train, y_train = create_dataset(train_scaled, lookback)
-
-    val_inputs = data[train_split - lookback : val_split]
-    val_inputs_scaled = scaler.transform(val_inputs)
-    X_val, y_val = create_dataset(val_inputs_scaled, lookback)
-
-    test_inputs = data[val_split - lookback :]
-    test_inputs_scaled = scaler.transform(test_inputs)
-    X_test, y_test = create_dataset(test_inputs_scaled, lookback)
-
-    model = Sequential([
-        Input(shape=(X_train.shape[1], X_train.shape[2])),
-        Bidirectional(LSTM(64, return_sequences=True)),
-        Dropout(0.3),
-        LSTM(32),
-        Dense(1)
-    ])
-    model.compile(optimizer=Adam(learning_rate=0.001), loss=Huber())
-
-    early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=0)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001, verbose=0)
-
-    print(f"   -> Model eğitiliyor...")
-    history = model.fit(X_train, y_train, epochs=100, batch_size=32, validation_data=(X_val, y_val), callbacks=[early_stopping, reduce_lr], verbose=0)
+    print(f"\n6. Walk-Forward Cross-Validation:")
+    cv_results = walk_forward_cv(data, target_idx, features, lookback, n_splits=4, epochs=25)
     
-    # =====================================================
-    # OVERFIT KONTROLÜ - Train ve Val performansı
-    # =====================================================
-    final_train_loss = history.history['loss'][-1]
-    final_val_loss = history.history['val_loss'][-1]
-    best_val_loss = min(history.history['val_loss'])
-    epochs_run = len(history.history['loss'])
+    print(f"\n7. Ana model egitimi (Train/Val/Test split):")
+    train_scaled = scaler.transform(data[:train_split])
+    X_train, y_train = create_dataset(train_scaled, target_idx, lookback)
+    val_scaled = scaler.transform(data[train_split-lookback:val_split])
+    X_val, y_val = create_dataset(val_scaled, target_idx, lookback)
+    test_scaled = scaler.transform(data[val_split-lookback:])
+    X_test, y_test = create_dataset(test_scaled, target_idx, lookback)
+    print(f"   Veri: Train={len(X_train)} | Val={len(X_val)} | Test={len(X_test)} | Lookback={lookback}")
     
-    # Train R² (in-sample)
-    pred_train = model.predict(X_train, verbose=0).flatten()
-    try: r2_train = r2_score(y_train, pred_train)
-    except: r2_train = 0
+    models = train_ensemble(X_train, y_train, X_val, y_val, n_models=3, epochs=80)
     
-    # Val R² (out-of-sample, eğitimde "görüldü" ama label olarak kullanılmadı)
-    pred_val = model.predict(X_val, verbose=0).flatten()
-    try: r2_val_set = r2_score(y_val, pred_val)
-    except: r2_val_set = 0
+    print(f"\n8. Test seti degerlendirmesi (Out-of-Sample):")
+    pred_test_mean, pred_test_std = ensemble_predict(models, X_test)
     
-    print(f"   -> Eğitim: {epochs_run} epoch | Train Loss: {final_train_loss:.5f} | Val Loss: {final_val_loss:.5f} (best: {best_val_loss:.5f})")
-    print(f"   -> Train R²: {r2_train:.4f} | Val R²: {r2_val_set:.4f}")
-    if r2_train - r2_val_set > 0.15:
-        print(f"   ⚠️  UYARI: Train ve Val R² arasında büyük fark var. Olası overfitting!")
-    
-    # Veri seti boyutları
-    print(f"   -> Veri: Train={len(X_train)} | Val={len(X_val)} | Test={len(X_test) if 'X_test' in dir() else 'N/A'} | Lookback={lookback}")
-    
-    # ============================================================
-    # GEÇMİŞ TAHMİN DOLDURMA - HIZ İÇİN KAPATILDI
-    # GIF için sadece son 10 günün tahminleri yapılır (hızlı).
-    # Tam geçmiş için: ENABLE_FILL_HISTORY = True yap
-    # ============================================================
-    ENABLE_FILL_HISTORY = False
-    if ENABLE_FILL_HISTORY:
-        fill_missing_predictions(ticker, df, model, scaler, features, target_idx, lookback)
-    else:
-        # Sadece son 10 günü doldur - GIF için yeterli
-        fill_recent_predictions(ticker, df, model, scaler, features, target_idx, lookback, days=10)
-
-    pred_test_scaled = model.predict(X_test, verbose=0)
-    dummy = np.zeros((len(pred_test_scaled), len(features)))
-    dummy[:, target_idx] = pred_test_scaled.flatten()
-    pred_test_ret = scaler.inverse_transform(dummy)[:, target_idx]
-
-    # ============================================================
-    # DOĞRU HİZALAMA: 
-    # X_test, val_split-lookback'ten başlar, indekslemesi şöyledir:
-    # X_test[i] = data[val_split-lookback+i : val_split+i]
-    # y_test[i] = data[val_split+i, target_idx] = günün log_return'i
-    # 
-    # Yani pred_test_ret[i], val_split+i. günün log return tahmini.
-    # actual_prices[i] = df['Close'].iloc[val_split + i]
-    # 
-    # Log return: log(P[t]/P[t-1]) - yani val_split+i. günün getirisi
-    # P[val_split+i-1] -> P[val_split+i] hareketini gösterir.
-    # ============================================================
+    dummy = np.zeros((len(pred_test_mean), len(features)))
+    dummy[:, target_idx] = pred_test_mean
+    pred_test_returns = scaler.inverse_transform(dummy)[:, target_idx]
     
     actual_prices = df['Close'].iloc[val_split:].values
-    actual_prices_with_prev = df['Close'].iloc[val_split-1:].values  # bir gün öncesi dahil
-    min_len = min(len(pred_test_ret), len(actual_prices))
-    pred_test_ret = pred_test_ret[:min_len]
+    min_len = min(len(pred_test_returns), len(actual_prices))
+    pred_test_returns = pred_test_returns[:min_len]
     actual_prices = actual_prices[:min_len]
-
-    # GERÇEK log returns: P[val_split+i] / P[val_split+i-1]
+    
+    actual_prices_with_prev = df['Close'].iloc[val_split-1:].values
     actual_returns_log = np.log(actual_prices_with_prev[1:min_len+1] / actual_prices_with_prev[:min_len])
     
-    # R2 - tahmin edilen ve gerçek log return aynı günü temsil eder (DOĞRU HİZALAMA)
-    try: r2_val = r2_score(actual_returns_log, pred_test_ret)
-    except: r2_val = 0
-
-    # ============================================================
-    # KRİTİK: Dürüst test metriği için TEACHER FORCING YOK!
-    # Gerçek koşulda model sadece tahminlerine güvenir.
-    # rec_prices: önceki TAHMİN edilen fiyattan başlayarak ileri yürür
-    # ============================================================
+    try: test_r2 = r2_score(actual_returns_log, pred_test_returns)
+    except: test_r2 = 0
+    
+    # Yön doğruluğu: yataya yakın tahminleri at, sahte isabeti engelle
+    threshold_test = np.std(actual_returns_log) * 0.1
+    pred_signs_test = np.where(np.abs(pred_test_returns) < threshold_test, 0, np.sign(pred_test_returns))
+    actual_signs_test = np.where(np.abs(actual_returns_log) < threshold_test, 0, np.sign(actual_returns_log))
+    non_flat_test = (pred_signs_test != 0) & (actual_signs_test != 0)
+    if non_flat_test.sum() > 0:
+        test_dir_acc = np.mean(pred_signs_test[non_flat_test] == actual_signs_test[non_flat_test]) * 100
+    else:
+        test_dir_acc = 50.0
+    print(f"   Test R2: {test_r2:.4f} | Test Yon Dogrulugu: %{test_dir_acc:.1f} ({non_flat_test.sum()}/{len(pred_test_returns)} karsilastirildi)")
+    
     rec_prices = []
-    prev_price = df['Close'].iloc[val_split-1]  # Sadece başlangıç noktası gerçek
+    pp = df['Close'].iloc[val_split-1]
     for i in range(min_len):
-        prev_price = prev_price * np.exp(pred_test_ret[i])  # ÖNCEKİ TAHMİN kullanılır
-        rec_prices.append(prev_price)
+        pp = pp * np.exp(pred_test_returns[i])
+        rec_prices.append(pp)
     rec_prices = np.array(rec_prices)
-
-    # 1-ADIM ÖNCELİK YÖN DOĞRULUĞU: 
-    # Tahmin edilen günlük getirinin yönü, gerçek günlük getirinin yönüyle eşleşiyor mu?
-    dir_acc = (np.sum(np.sign(pred_test_ret) == np.sign(actual_returns_log)) / len(actual_returns_log)) * 100 if len(actual_returns_log)>0 else 0
     
-    # 1-ADIM TEACHER FORCING ile fiyat doğruluğu (referans için)
-    rec_prices_tf = []
-    for i in range(min_len):
-        prev = df['Close'].iloc[val_split-1] if i == 0 else actual_prices[i-1]
-        rec_prices_tf.append(prev * np.exp(pred_test_ret[i]))
-    rec_prices_tf = np.array(rec_prices_tf)
-    price_acc = 100 - (mean_absolute_percentage_error(actual_prices, rec_prices_tf) * 100)
-
-    stock_ret_series = df['Log_Ret']
-    beta, alpha = calculate_alpha_beta(stock_ret_series, market_returns)
-    extended_metrics = calculate_metrics_extended(rec_prices, pred_test_ret)
-
-    # ============================================================
-    # 7 GÜNLÜK GELECEK TAHMİNİ (Rekürsif - saf model çıktısı)
-    # SMOOTH_FACTOR=0 -> Saf model tahmini (dürüst)
-    # SMOOTH_FACTOR=0.3 -> Trendle yumuşatılmış (daha tutucu, ama metriğe sızabilir)
-    # ============================================================
-    SMOOTH_FACTOR = 0.0  # Dürüst tahmin için 0, daha tutucu için 0.3
+    print(f"\n9. Baseline karsilastirmasi (Diebold-Mariano testi):")
+    train_returns = df['Log_Ret'].iloc[:val_split].dropna().values
+    pred_naive = baseline_naive(actual_returns_log)
+    pred_mean = baseline_mean(train_returns, actual_returns_log)
+    pred_rw = baseline_random_walk(train_returns, actual_returns_log)
     
-    full_data_scaled = scaler.transform(data)
-    last_batch = full_data_scaled[-lookback:].reshape(1, lookback, len(features))
-    future_prices = []
-    curr_p = df['Close'].iloc[-1]
-
-    temp_batch = last_batch.copy()
-    recent_trend = np.mean(temp_batch[0, -10:, target_idx])
-
-    for i in range(7):
-        raw_pred = model.predict(temp_batch, verbose=0)[0,0]
-        # Yumuşatma faktörü 0 ise saf model tahmini kullanılır
-        p_sc = (raw_pred * (1 - SMOOTH_FACTOR)) + (recent_trend * SMOOTH_FACTOR)
-        d = np.zeros((1, len(features)))
-        d[0, target_idx] = p_sc
-        p_ret = scaler.inverse_transform(d)[0, target_idx]
-
-        curr_p = curr_p * np.exp(p_ret)
-        future_prices.append(curr_p)
-
-        new_row = temp_batch[0, -1, :].copy()
-        new_row[target_idx] = p_sc 
-        temp_batch = np.append(temp_batch[:, 1:, :], new_row.reshape(1,1,len(features)), axis=1)
-
+    mse_model = mean_squared_error(actual_returns_log, pred_test_returns)
+    mse_naive = mean_squared_error(actual_returns_log, pred_naive)
+    mse_mean = mean_squared_error(actual_returns_log, pred_mean)
+    mse_rw = mean_squared_error(actual_returns_log, pred_rw)
+    
+    dm_naive_stat, dm_naive_p = diebold_mariano_test(actual_returns_log, pred_test_returns, pred_naive)
+    dm_mean_stat, dm_mean_p = diebold_mariano_test(actual_returns_log, pred_test_returns, pred_mean)
+    dm_rw_stat, dm_rw_p = diebold_mariano_test(actual_returns_log, pred_test_returns, pred_rw)
+    
+    print(f"   MSE Karsilastirmasi:")
+    print(f"      LSTM Model    : {mse_model:.6f}")
+    print(f"      Naive (zero)  : {mse_naive:.6f} | DM p-value: {dm_naive_p:.4f}")
+    print(f"      Mean baseline : {mse_mean:.6f} | DM p-value: {dm_mean_p:.4f}")
+    print(f"      Random Walk   : {mse_rw:.6f} | DM p-value: {dm_rw_p:.4f}")
+    print(f"   NOT: p-value < 0.05 -> istatistiksel anlamli fark var")
+    
+    print(f"\n10. Backtest stratejisi:")
+    bt = backtest_strategy(actual_prices, pred_test_returns, threshold=0.001)
+    if bt:
+        print(f"   Strateji Sharpe : {bt['strategy']['sharpe']:.2f}")
+        print(f"   Buy&Hold Sharpe : {bt['buy_hold']['sharpe']:.2f}")
+        print(f"   Islem Sayisi    : {bt['n_trades']}")
+        print(f"   Piyasada Kalma  : %{bt['pct_in_market']:.1f}")
+    
+    print(f"\n11. {PREDICTION_HORIZON} gunluk gelecek tahmini:")
+    last_batch = scaler.transform(data)[-lookback:].reshape(1, lookback, len(features))
+    future_prices, future_lower, future_upper = multi_step_forecast(
+        models, last_batch, scaler, features, target_idx,
+        df['Close'].iloc[-1], n_steps=PREDICTION_HORIZON
+    )
+    
     target_price = future_prices[-1]
+    ci_low = future_lower[-1]
+    ci_high = future_upper[-1]
     current_atr = df['ATR'].iloc[-1]
     signal, sig_color, sig_desc = generate_signal(df['Close'].iloc[-1], target_price, current_atr * 3)
-
-    fut_dates = pd.date_range(df.index[-1]+timedelta(days=1), periods=7)
-    save_predictions_to_sqlite(ticker, fut_dates, future_prices)
-
-    gif_b64 = create_prediction_gif(ticker, df, fut_dates, future_prices)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    fut_dates = pd.date_range(df.index[-1] + timedelta(days=1), periods=PREDICTION_HORIZON, freq='B')
+    save_predictions_to_sqlite(TICKER, fut_dates, future_prices)
+    
+    stock_ret_series = df['Log_Ret']
+    beta, alpha = calculate_alpha_beta(stock_ret_series, market_returns)
+    
+    real_metrics = calculate_real_metrics(df['Log_Ret'].tail(252).dropna().values)
+    
     test_dates = df.index[val_split:][:min_len]
-    ax.plot(df.index[-150:], df['Close'].iloc[-150:], label="Gerçek Fiyat", color="#1f2937")
-    ax.plot(test_dates, rec_prices, label="Model Testi (OOS)", linestyle="--", color="#f59e0b")
-
-    ax.plot(fut_dates, future_prices, 
-            label="7 Günlük Tahmin", 
-            color=sig_color, 
-            linewidth=2, 
-            marker='o',      
-            markersize=4,            
-            markerfacecolor=sig_color, 
-            markeredgewidth=0,
-            zorder=10)
-
-    ax.set_title(f"{name} ({ticker}) Fiyat Tahmini")
-    ax.legend(); ax.grid(True, alpha=0.2)
-
-    buf = BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0)
-    chart_b64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close(fig)
-
+    chart_b64 = plot_main_chart(df, val_split, test_dates, rec_prices, fut_dates,
+                                 future_prices, future_lower, future_upper, sig_color,
+                                 TICKER_NAME, TICKER)
+    
     extras = {
         'rsi': mini_plot(df['RSI'], 'purple', 'RSI'),
         'macd': mini_plot(df['MACD'], 'blue', 'MACD'),
-        'bollinger': mini_plot(df['SEMI_ETF'] if 'SEMI_ETF' in df.columns else df['SP500'], 'darkblue', 'SOXX (Yarı İletken ETF)'),
+        'cv': plot_cv_scores(cv_results) or mini_plot(df['SEMI_ETF'] if 'SEMI_ETF' in df.columns else df['Close'], 'darkblue', 'SOXX'),
         'reg_channel': plot_regression_channel(df),
         'drawdown': plot_drawdown(df),
-        'volatility': plot_volatility_cone(df),
-        'volume': plot_volume_osc(df),
+        'volatility': plot_volatility(df),
+        'volume': plot_volume(df),
         'ma_cross': plot_ma_cross(df),
         'heatmap': plot_heatmap(df)
     }
-
+    
+    is_significant = min(dm_naive_p, dm_rw_p) < 0.05 and cv_results['avg_dir_acc'] > 52
+    yorum = ('Model baseline\'lardan istatistiksel olarak daha iyi tahmin yapiyor.' if is_significant 
+             else 'UYARI: Model baseline\'lardan istatistiksel olarak ANLAMLI sekilde FARKLI DEGIL. Tahminlere ihtiyatla yaklasin.')
+    
+    science_html = f"""
+    <div class="science-box">
+    <h3>Bilimsel Dogrulama Sonuclari</h3>
+    <table>
+    <tr><td><b>Walk-Forward CV (4-fold)</b></td><td>R^2 = {cv_results['avg_r2']:.4f} | Yon = %{cv_results['avg_dir_acc']:.1f} (+/-{cv_results['std_dir_acc']:.1f}%)</td></tr>
+    <tr><td><b>Test Set (OOS)</b></td><td>R^2 = {test_r2:.4f} | Yon = %{test_dir_acc:.1f}</td></tr>
+    <tr><td><b>Diebold-Mariano</b></td><td>vs Naive: p={dm_naive_p:.3f} | vs RW: p={dm_rw_p:.3f} {'[Anlamli]' if min(dm_naive_p, dm_rw_p) < 0.05 else '[Anlamsiz]'}</td></tr>
+    <tr><td><b>MSE</b></td><td>Model={mse_model:.5f} | Naive={mse_naive:.5f} | RW={mse_rw:.5f}</td></tr>
+    <tr><td><b>Backtest Sharpe</b></td><td>Strateji={bt['strategy']['sharpe']:.2f} vs Buy&Hold={bt['buy_hold']['sharpe']:.2f}</td></tr>
+    <tr><td><b>Ensemble</b></td><td>3 model ortalamasi | Lookback: {lookback} gun (bilimsel secim)</td></tr>
+    </table>
+    <div style="margin-top:8px; font-size:0.85em; color:#92400e;">
+    <b>Yorum:</b> {yorum}
+    </div>
+    </div>
+    """
+    
     metrics = {
-        'current_price': df['Close'].iloc[-1], 'target_price': target_price,
+        'current_price': df['Close'].iloc[-1],
+        'target_price': target_price,
+        'ci_low': ci_low, 'ci_high': ci_high,
         'signal': signal, 'signal_color': sig_color, 'signal_desc': sig_desc,
-        'alpha': alpha, 'beta': beta, 'bench_name': bench_name,
-        'price_acc': price_acc if price_acc > 0 else 0,
-        'dir_acc': dir_acc, 
-        'mdd': extended_metrics['mdd'], 
-        'sharpe': extended_metrics['sharpe'],
-        'sortino': extended_metrics['sortino'],
-        'calmar': extended_metrics['calmar'],
-        'volatility': extended_metrics['volatility'],
-        'r2_score': r2_val,
-        'lookback': lookback
+        'alpha': alpha, 'beta': beta,
+        'cv_r2': cv_results['avg_r2'], 
+        'cv_dir_acc': cv_results['avg_dir_acc'],
+        'cv_std_dir': cv_results['std_dir_acc'],
+        'test_r2': test_r2,
+        'test_dir_acc': test_dir_acc,
+        'bt_sharpe': bt['strategy']['sharpe'] if bt else 0,
+        'bh_sharpe': bt['buy_hold']['sharpe'] if bt else 0,
+        'mdd': real_metrics['mdd'],
+        'volatility': real_metrics['volatility'],
+        'lookback': lookback,
+        'news_score': news_score,
+        'dm_naive_p': dm_naive_p,
+        'dm_rw_p': dm_rw_p
     }
-    return metrics, chart_b64, extras, gif_b64
-
-# --- MAIN ---
-def main():
+    
     report = HTMLRapor()
-    init_db()
-
-    print("="*60)
-    print("INTC (Intel Corporation) AI ANALİZ PANELİ v9.1")
-    print("="*60)
-    print("1. Makro Veriler İndiriliyor (S&P500, NASDAQ, SOXX, VIX, Petrol, Tahvil)...")
-    macro_df = get_macro_data()
-
-    for ticker, info in etf_map.items():
-        print(f"\n>> {ticker} ({info['name']}) Analiz Ediliyor...")
-        news_score, news_items = get_advanced_sentiment(ticker)
-        result = analyze_ticker(ticker, info, macro_df)
-
-        if result:
-            metrics, chart, extras, gif_b64 = result
-            metrics['news_score'] = news_score
-            report.add_section(ticker, info['name'], metrics, chart, extras, news_items, gif_b64)
-            print(f"\n   {'='*50}")
-            print(f"   ANALİZ TAMAMLANDI:")
-            print(f"   {'='*50}")
-            print(f"   Mevcut Fiyat   : ${metrics['current_price']:.2f}")
-            print(f"   Hedef Fiyat 7G : ${metrics['target_price']:.2f}")
-            print(f"   Potansiyel     : %{((metrics['target_price']-metrics['current_price'])/metrics['current_price']*100):+.2f}")
-            print(f"   Sinyal         : {metrics['signal']} ({metrics['signal_desc']})")
-            print(f"   Yön Başarısı   : %{metrics['dir_acc']:.1f}")
-            print(f"   R-Kare         : {metrics['r2_score']:.3f}")
-            print(f"   Sharpe         : {metrics['sharpe']:.2f}")
-            print(f"   Sortino        : {metrics['sortino']:.2f}")
-            print(f"   Alpha (yıllık) : {metrics['alpha']:.2f}")
-            print(f"   Beta vs SP500  : {metrics['beta']:.2f}")
-            print(f"   Volatilite     : %{metrics['volatility']:.1f}")
-            print(f"   Max Drawdown   : %{metrics['mdd']:.1f}")
-            print(f"   Haber Skoru    : {metrics['news_score']:+.2f}")
-            print(f"   Lookback (Bil.): {metrics['lookback']} gün (geriye bakma penceresi)")
-
+    report.add_section(TICKER, TICKER_NAME, metrics, chart_b64, extras, news_items, science_html)
     report.save()
-    print("\n" + "="*60)
-    print("ANALİZ BİTTİ. Rapor: INTC_Analiz.html")
-    print("="*60)
+    
+    print("\n" + "="*65)
+    print("OZET SONUCLAR:")
+    print("="*65)
+    print(f"   Mevcut Fiyat        : ${metrics['current_price']:.2f}")
+    print(f"   Hedef ({PREDICTION_HORIZON}G)         : ${target_price:.2f}")
+    print(f"   95% Guven Araligi   : ${ci_low:.2f} - ${ci_high:.2f}")
+    print(f"   Potansiyel          : %{((target_price-metrics['current_price'])/metrics['current_price']*100):+.2f}")
+    print(f"   Sinyal              : {signal} ({sig_desc})")
+    print(f"   CV Yon Dogrulugu    : %{metrics['cv_dir_acc']:.1f} +/- %{metrics['cv_std_dir']:.1f}")
+    print(f"   CV R^2              : {metrics['cv_r2']:.4f}")
+    print(f"   Test Yon Dogrulugu  : %{metrics['test_dir_acc']:.1f}")
+    print(f"   Test R^2            : {metrics['test_r2']:.4f}")
+    print(f"   DM Test (vs RW)     : p={metrics['dm_rw_p']:.4f} {'[Anlamli]' if metrics['dm_rw_p']<0.05 else '[Anlamsiz]'}")
+    print(f"   Backtest Sharpe     : {metrics['bt_sharpe']:.2f} vs Buy&Hold: {metrics['bh_sharpe']:.2f}")
+    print(f"   Volatilite (yillik) : %{metrics['volatility']:.1f}")
+    print(f"   Beta vs S&P 500     : {metrics['beta']:.2f}")
+    print(f"   Alpha (yillik)      : {metrics['alpha']:+.2f}")
+    print("="*65)
+    print("ANALIZ TAMAMLANDI. Rapor: INTC_Analiz.html")
+    print("="*65)
 
 if __name__ == "__main__":
-    main()
+    init_db()
+    analyze()
