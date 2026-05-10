@@ -9,7 +9,7 @@ def install_package(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--no-cache-dir"])
 
 # SADECE GEREKLİ KÜTÜPHANELER
-required_packages = ['tf-keras', 'ta', 'yfinance', 'GoogleNews', 'textblob', 'scipy', 'seaborn', 'sklearn', 'imageio']
+required_packages = ['tf-keras', 'ta', 'yfinance', 'GoogleNews', 'textblob', 'scipy', 'seaborn', 'sklearn', 'imageio', 'statsmodels']
 for package in required_packages:
     try: importlib.import_module(package.replace('-', '_'))
     except ImportError:
@@ -36,6 +36,11 @@ from GoogleNews import GoogleNews
 import ta
 from textblob import TextBlob
 from scipy import stats
+try:
+    from statsmodels.tsa.stattools import acf
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
 import seaborn as sns
 import imageio.v2 as imageio 
 
@@ -705,6 +710,126 @@ def mini_plot(d, c, t):
     b = BytesIO(); f.savefig(b, format='png', bbox_inches='tight'); b.seek(0); plt.close(f)
     return base64.b64encode(b.read()).decode('utf-8')
 
+# --- BİLİMSEL LOOKBACK OPTİMİZASYONU ---
+def estimate_lookback_acf(log_returns, max_lag=500, alpha=0.05):
+    """
+    ACF (Autocorrelation Function) ile başlangıç lookback tahmini.
+    Anlamlı korelasyonun bittiği son lag + güvenlik payı dönülür.
+    
+    Finansal getiriler genelde düşük otokorelasyona sahiptir, bu yüzden
+    ABSOLUTE returns (volatilite kümelenmesi) daha bilgilendirici olur.
+    """
+    if not HAS_STATSMODELS:
+        return None
+    
+    # Volatilite kümelenmesi için mutlak getiriler (ARCH etkisi)
+    abs_returns = np.abs(log_returns.dropna().values)
+    
+    if len(abs_returns) < max_lag * 2:
+        max_lag = len(abs_returns) // 4
+    
+    try:
+        acf_values, confint = acf(abs_returns, nlags=max_lag, alpha=alpha, fft=True)
+        # Güven aralığının üst sınırı (anlamlılık eşiği)
+        upper_bound = confint[:, 1] - acf_values  # bootstrap CI
+        
+        # ACF değerinin güven aralığından çıktığı son lag
+        significant_lags = np.where(np.abs(acf_values[1:]) > upper_bound[1:])[0]
+        
+        if len(significant_lags) == 0:
+            return 60  # default
+        
+        # Anlamlı son lag + %20 güvenlik payı
+        last_significant = significant_lags[-1] + 1
+        suggested = int(last_significant * 1.2)
+        return max(30, min(suggested, max_lag))
+    except Exception as e:
+        print(f"   ACF hesaplama hatası: {e}")
+        return None
+
+
+def find_optimal_lookback(data, features, target_idx, train_split, val_split, scaler,
+                           candidate_lookbacks=[60, 120, 250, 500],
+                           epochs=20, verbose=True):
+    """
+    Walk-forward grid search: Aday lookback değerlerini validation setinde dener.
+    En düşük val_loss'u veren lookback seçilir.
+    
+    HIZLANDIRMA: Her aday için sadece 20 epoch eğitilir (tam eğitim değil).
+    Bu, hangi lookback'in daha iyi öğrendiğini gösterir.
+    """
+    if verbose:
+        print(f"   -> Optimum lookback aranıyor: {candidate_lookbacks}")
+    
+    results = {}
+    
+    for lb in candidate_lookbacks:
+        # Yetersiz veri kontrolü
+        if train_split <= lb + 50:
+            if verbose:
+                print(f"      lookback={lb}: yetersiz train verisi, atlandı")
+            continue
+        
+        # Veri hazırlama
+        train_raw = data[:train_split]
+        train_scaled = scaler.transform(train_raw)
+        
+        X_tr, y_tr = [], []
+        for i in range(lb, len(train_scaled)):
+            X_tr.append(train_scaled[i-lb:i])
+            y_tr.append(train_scaled[i, target_idx])
+        X_tr, y_tr = np.array(X_tr), np.array(y_tr)
+        
+        val_inputs = data[train_split - lb : val_split]
+        val_scaled = scaler.transform(val_inputs)
+        X_v, y_v = [], []
+        for i in range(lb, len(val_scaled)):
+            X_v.append(val_scaled[i-lb:i])
+            y_v.append(val_scaled[i, target_idx])
+        X_v, y_v = np.array(X_v), np.array(y_v)
+        
+        if len(X_v) < 10:
+            continue
+        
+        # Hızlı eğitim için küçük model
+        set_seeds()
+        m = Sequential([
+            Input(shape=(X_tr.shape[1], X_tr.shape[2])),
+            LSTM(32),
+            Dense(1)
+        ])
+        m.compile(optimizer=Adam(learning_rate=0.001), loss=Huber())
+        
+        es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0)
+        
+        hist = m.fit(X_tr, y_tr, epochs=epochs, batch_size=64,
+                     validation_data=(X_v, y_v), callbacks=[es], verbose=0)
+        
+        # Val R² hesabı
+        pred_v = m.predict(X_v, verbose=0).flatten()
+        try:
+            r2_v = r2_score(y_v, pred_v)
+        except:
+            r2_v = -1.0
+        
+        best_val_loss = min(hist.history['val_loss'])
+        results[lb] = {'val_loss': best_val_loss, 'r2': r2_v, 'epochs': len(hist.history['loss'])}
+        
+        if verbose:
+            print(f"      lookback={lb}: val_loss={best_val_loss:.5f} | val_R²={r2_v:.4f} | epochs={len(hist.history['loss'])}")
+    
+    if not results:
+        return 60  # fallback
+    
+    # En düşük val_loss kazanır (R² yerine loss daha güvenilir, çünkü R² negatif olabilir)
+    best_lb = min(results.keys(), key=lambda k: results[k]['val_loss'])
+    
+    if verbose:
+        print(f"   ✅ SEÇİLEN LOOKBACK: {best_lb} gün (val_loss={results[best_lb]['val_loss']:.5f})")
+    
+    return best_lb
+
+
 # --- ANALİZ ÇEKİRDEĞİ ---
 def analyze_ticker(ticker, info, macro_df):
     set_seeds()
@@ -738,7 +863,29 @@ def analyze_ticker(ticker, info, macro_df):
     scaler.fit(train_raw)
     train_scaled = scaler.transform(train_raw)
 
-    lookback = 60
+    # ============================================================
+    # BİLİMSEL LOOKBACK SEÇİMİ
+    # 1. ACF ile başlangıç tahmini (volatilite kümelenmesi)
+    # 2. Grid search ile validation setinde en iyi lookback bulunur
+    # ============================================================
+    
+    # Adım 1: ACF tabanlı hint
+    log_ret_train = df['Log_Ret'].iloc[:train_split]
+    acf_hint = estimate_lookback_acf(log_ret_train, max_lag=500)
+    if acf_hint:
+        print(f"   -> ACF analizi öneriyor: ~{acf_hint} gün")
+    
+    # Adım 2: Grid search adayları (ACF hint'ini de dahil et)
+    candidates = sorted(set([60, 120, 250, 500] + ([acf_hint] if acf_hint else [])))
+    # Veriye göre filtrele
+    candidates = [c for c in candidates if c < train_split - 100]
+    
+    lookback = find_optimal_lookback(
+        data=data, features=features, target_idx=target_idx,
+        train_split=train_split, val_split=val_split, scaler=scaler,
+        candidate_lookbacks=candidates,
+        epochs=20  # hızlı arama için
+    )
 
     def create_dataset(dataset, lb=60):
         X, Y = [], []
@@ -796,7 +943,7 @@ def analyze_ticker(ticker, info, macro_df):
         print(f"   ⚠️  UYARI: Train ve Val R² arasında büyük fark var. Olası overfitting!")
     
     # Veri seti boyutları
-    print(f"   -> Veri: Train={len(X_train)} | Val={len(X_val)} | Test={len(X_test) if 'X_test' in dir() else 'N/A'}")
+    print(f"   -> Veri: Train={len(X_train)} | Val={len(X_val)} | Test={len(X_test) if 'X_test' in dir() else 'N/A'} | Lookback={lookback}")
     
     # ============================================================
     # GEÇMİŞ TAHMİN DOLDURMA - HIZ İÇİN KAPATILDI
@@ -954,7 +1101,8 @@ def analyze_ticker(ticker, info, macro_df):
         'sortino': extended_metrics['sortino'],
         'calmar': extended_metrics['calmar'],
         'volatility': extended_metrics['volatility'],
-        'r2_score': r2_val
+        'r2_score': r2_val,
+        'lookback': lookback
     }
     return metrics, chart_b64, extras, gif_b64
 
@@ -994,6 +1142,7 @@ def main():
             print(f"   Volatilite     : %{metrics['volatility']:.1f}")
             print(f"   Max Drawdown   : %{metrics['mdd']:.1f}")
             print(f"   Haber Skoru    : {metrics['news_score']:+.2f}")
+            print(f"   Lookback (Bil.): {metrics['lookback']} gün (geriye bakma penceresi)")
 
     report.save()
     print("\n" + "="*60)
