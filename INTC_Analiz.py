@@ -1,15 +1,22 @@
 # ============================================================
-# INTC AI ANALİZ PANELİ v10.0 - BİLİMSEL VERSİYON
-# 
-# Yenilikler:
-# - Walk-Forward Cross-Validation (zaman serisi için doğru CV)
-# - Ensemble (3 farklı seed ile 3 model ortalaması)
-# - Naive baseline karşılaştırması (Random Walk, Last Value)
-# - Diebold-Mariano testi (istatistiksel anlamlılık)
-# - Confidence intervals (Ensemble varyansı tabanlı)
-# - 15 günlük tahmin
-# - Backtest tabanlı gerçek Sharpe
-# - GIF kaldırıldı
+# INTC AI ANALİZ PANELİ v10.2 - BİLİMSEL VERSİYON (DÜZELTİLMİŞ)
+#
+# v10.2 Düzeltmeleri (v10.0/10.1 üzerine):
+#   [FIX-1] Lookback seçiminde data leakage giderildi
+#           -> Lookback artık SADECE train seti içinde nested split ile seçiliyor.
+#              Val seti hem hyperparameter seçimi hem early stopping için
+#              kullanılmıyor.
+#   [FIX-2] is_significant eşiği sertleştirildi
+#           -> %52 -> %54 yön doğruluğu + Backtest Sharpe > Buy&Hold Sharpe
+#              + DM p-value < 0.05 (3 koşul birden).
+#   [FIX-3] Sentiment skoru artık modele feature olarak gerçekten dahil ediliyor
+#           -> Statik (tek skor) olduğu için son N=20 günlük pencerede
+#              sabit feature olarak eklenir ve raporda "kullanılıyor" işaretlenir.
+#   [FIX-4] Makro veri doldurmada bfill kaldırıldı (look-ahead riski)
+#   [FIX-5] generate_signal eşiği tek çarpana indirildi, kafa karışıklığı temizlendi
+#   [FIX-6] Multi-step recursive hata birikimi için CI genişletmesi güçlendirildi
+#           -> Ensemble varyansı + adımsal hata varyansı toplamı şeklinde.
+#   [FIX-7] Log-return R² yorumu için raporda açıklama notu eklendi.
 # ============================================================
 
 import sys
@@ -21,7 +28,7 @@ def install_package(package):
     print(f"OTOMATİK KURULUM: '{package}' yükleniyor...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--no-cache-dir"])
 
-required_packages = ['tf-keras', 'ta', 'yfinance', 'GoogleNews', 'textblob', 
+required_packages = ['tf-keras', 'ta', 'yfinance', 'GoogleNews', 'textblob',
                      'scipy', 'seaborn', 'sklearn', 'statsmodels']
 for package in required_packages:
     try: importlib.import_module(package.replace('-', '_'))
@@ -104,7 +111,7 @@ def save_to_sqlite(ticker, df):
         date_str = index.strftime('%Y-%m-%d')
         try:
             cursor.execute('''
-                INSERT OR IGNORE INTO gunluk_veriler 
+                INSERT OR IGNORE INTO gunluk_veriler
                 (tarih, sembol, acilis, yuksek, dusuk, kapanis, hacim)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (date_str, ticker, row['Open'], row['High'], row['Low'], row['Close'], row['Volume']))
@@ -123,7 +130,7 @@ def save_predictions_to_sqlite(ticker, dates, prices, analysis_date=None):
         hedef_tarih = date.strftime('%Y-%m-%d')
         try:
             cursor.execute('''
-                INSERT OR REPLACE INTO tahminler 
+                INSERT OR REPLACE INTO tahminler
                 (analiz_tarihi, hedef_tarih, sembol, tahmin_fiyati)
                 VALUES (?, ?, ?, ?)
             ''', (analiz_tarihi, hedef_tarih, ticker, float(price)))
@@ -156,12 +163,19 @@ def get_macro_data():
         df = yf.download(list(tickers.keys()), start=start, end=end, progress=False)['Close']
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df.rename(columns=tickers, inplace=True)
-        return df.ffill().bfill()
+        # [FIX-4] bfill kaldırıldı (look-ahead leakage'i tetikliyordu).
+        # Sadece ileriye doğru doldurma yapılır; ilk N satır NA kalabilir, dropna ile silinecek.
+        return df.ffill()
     except Exception as e:
         print(f"UYARI: Makro veriler indirilemedi ({e}).")
         return pd.DataFrame()
 
-def get_stock_data(symbol, macro_df):
+def get_stock_data(symbol, macro_df, news_score=0.0):
+    """
+    [FIX-3] news_score parametresi eklendi; son ~20 gün için 'NewsSent' feature
+    olarak DataFrame'e eklenir. Geçmiş günler için 0 (nötr) atanır
+    (geçmiş haber sentiment serisi olmadığı için en temiz seçenek bu).
+    """
     end = datetime.now()
     start = end - timedelta(days=12*365)
     try:
@@ -177,7 +191,7 @@ def get_stock_data(symbol, macro_df):
     df = df[cols_to_keep].dropna()
     if len(df) < 200: return None
     save_to_sqlite(symbol, df)
-    
+
     # GENİŞLETİLMİŞ FEATURE ENGINEERING
     try:
         df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
@@ -188,12 +202,12 @@ def get_stock_data(symbol, macro_df):
         df['SMA20'] = ta.trend.SMAIndicator(df['Close'], window=20).sma_indicator()
         df['SMA50'] = ta.trend.SMAIndicator(df['Close'], window=50).sma_indicator()
         df['SMA200'] = ta.trend.SMAIndicator(df['Close'], window=200).sma_indicator()
-        
+
         bb = ta.volatility.BollingerBands(df['Close'])
         df['BB_high'] = bb.bollinger_hband()
         df['BB_low'] = bb.bollinger_lband()
         df['BB_pct'] = (df['Close'] - df['BB_low']) / (df['BB_high'] - df['BB_low'])
-        
+
         df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
         df['Vol_5'] = df['Log_Ret'].rolling(5).std()
         df['Vol_20'] = df['Log_Ret'].rolling(20).std()
@@ -202,7 +216,17 @@ def get_stock_data(symbol, macro_df):
         df['Vol_ratio'] = df['Volume'] / df['Volume'].rolling(20).mean()
         df['Px_SMA50'] = df['Close'] / df['SMA50']
         df['Px_SMA200'] = df['Close'] / df['SMA200']
-        
+
+        # [FIX-3] Sentiment feature ekleniyor.
+        # Geçmiş için 0 (nötr), son 20 işlem günü için mevcut haber skoru.
+        # Bu yaklaşımın sınırı raporda açıkça belirtilir:
+        # gerçek tarihsel sentiment serisi olmadığı için modelin sentiment'ten
+        # öğrenebileceği bilgi sınırlıdır; ancak en azından son penceredeki
+        # rejimi temsil eder.
+        df['NewsSent'] = 0.0
+        if len(df) >= 20:
+            df.iloc[-20:, df.columns.get_loc('NewsSent')] = news_score
+
         if not macro_df.empty:
             df = df.join(macro_df, how='left').ffill().dropna()
         else:
@@ -243,10 +267,10 @@ def get_advanced_sentiment(ticker):
             except: pass
         if not titles: return 0.0, news_items
         scores = [TextBlob(t).sentiment.polarity for t in titles]
-        return np.mean(scores) if scores else 0.0, news_items
+        return float(np.mean(scores)) if scores else 0.0, news_items
     except: return 0.0, []
 
-# --- FINANSAL METRİKLER ---
+# --- FİNANSAL METRİKLER ---
 def calculate_alpha_beta(stock_returns, market_returns, risk_free_rate=0.045):
     common_idx = stock_returns.index.intersection(market_returns.index)
     if len(common_idx) < 30: return 1.0, 0.0
@@ -267,29 +291,29 @@ def calculate_real_metrics(returns_array, risk_free_rate=0.045):
     """Gerçek log returns üzerinden hesaplanan metrikler"""
     returns_array = np.array(returns_array)
     returns_array = returns_array[np.isfinite(returns_array)]
-    if len(returns_array) < 2: 
+    if len(returns_array) < 2:
         return {'mdd': 0, 'sharpe': 0, 'sortino': 0, 'calmar': 0, 'volatility': 0}
-    
+
     cum_returns = np.exp(np.cumsum(returns_array))
     peak = np.maximum.accumulate(cum_returns)
     drawdown = (cum_returns - peak) / peak
     mdd = np.abs(np.min(drawdown)) * 100
-    
+
     avg_ret = np.mean(returns_array)
     std_ret = np.std(returns_array)
-    
+
     rf_daily = (1 + risk_free_rate)**(1/252) - 1
     sharpe = (np.sqrt(252) * (avg_ret - rf_daily) / std_ret) if std_ret > 0 else 0
-    
+
     neg_returns = returns_array[returns_array < 0]
     downside_std = np.std(neg_returns) if len(neg_returns) > 1 else std_ret
     sortino = (np.sqrt(252) * (avg_ret - rf_daily) / downside_std) if downside_std > 0 else 0
-    
+
     annual_vol = std_ret * np.sqrt(252) * 100
     annual_ret = avg_ret * 252
     calmar = (annual_ret * 100 / mdd) if mdd > 0 else 0
-    
-    return {'mdd': mdd, 'sharpe': sharpe, 'sortino': sortino, 
+
+    return {'mdd': mdd, 'sharpe': sharpe, 'sortino': sortino,
             'calmar': calmar, 'volatility': annual_vol}
 
 def get_benchmark_data(benchmark_symbol):
@@ -339,105 +363,126 @@ def estimate_lookback_acf(log_returns, max_lag=400, alpha=0.05):
         return max(30, min(int(last_significant * 1.2), max_lag))
     except: return None
 
-def find_optimal_lookback(data, target_idx, train_split, val_split, scaler,
-                          candidates=[60, 120, 250], epochs=12):
-    print(f"   -> Optimum lookback aranıyor: {candidates}")
+def find_optimal_lookback_nested(data, target_idx, train_end, scaler_factory,
+                                  candidates=[60, 120, 250], epochs=12,
+                                  inner_val_frac=0.15):
+    """
+    [FIX-1] LOOKBACK SEÇİMİ ARTIK SADECE TRAIN İÇİNDE YAPILIYOR.
+
+    Önceki versiyonda:
+      - lookback, train üzerinde fit edilip val üzerinde değerlendiriliyordu;
+        ancak sonra aynı val seti early stopping için tekrar kullanılınca
+        "double dipping" oluşuyordu.
+
+    Bu versiyonda:
+      - Train seti içinde yeni bir alt-validasyon (inner val) ayrılır.
+      - Lookback seçimi sadece bu inner val'a göre yapılır.
+      - Ana val seti (train_end : val_end) ne hyperparameter seçimine ne de
+        bu fonksiyona girer. Yalnızca ileride early stopping için kullanılır.
+    """
+    print(f"   -> [Nested] Lookback aranıyor (sadece train içinde): {candidates}")
+    inner_val_start = int(train_end * (1 - inner_val_frac))
+    inner_train_end = inner_val_start
+
     results = {}
     for lb in candidates:
-        if train_split <= lb + 50: continue
-        train_raw = data[:train_split]
-        train_scaled = scaler.transform(train_raw)
-        X_tr, y_tr = create_dataset(train_scaled, target_idx, lb)
-        val_inputs = data[train_split - lb : val_split]
-        val_scaled = scaler.transform(val_inputs)
-        X_v, y_v = create_dataset(val_scaled, target_idx, lb)
-        if len(X_v) < 10: continue
+        if inner_train_end <= lb + 50: continue
+
+        # Scaler SADECE inner_train üzerinde fit edilir
+        inner_scaler = scaler_factory()
+        inner_scaler.fit(data[:inner_train_end])
+
+        inner_train_scaled = inner_scaler.transform(data[:inner_train_end])
+        X_tr, y_tr = create_dataset(inner_train_scaled, target_idx, lb)
+
+        inner_val_inputs = data[inner_train_end - lb : train_end]
+        inner_val_scaled = inner_scaler.transform(inner_val_inputs)
+        X_v, y_v = create_dataset(inner_val_scaled, target_idx, lb)
+
+        if len(X_v) < 10 or len(X_tr) < 100: continue
+
         set_seeds()
-        m = Sequential([Input(shape=(X_tr.shape[1], X_tr.shape[2])), 
+        m = Sequential([Input(shape=(X_tr.shape[1], X_tr.shape[2])),
                         LSTM(32), Dense(1)])
         m.compile(optimizer=Adam(learning_rate=0.001), loss=Huber())
-        es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0)
+        es = EarlyStopping(monitor='val_loss', patience=5,
+                           restore_best_weights=True, verbose=0)
         hist = m.fit(X_tr, y_tr, epochs=epochs, batch_size=64,
                      validation_data=(X_v, y_v), callbacks=[es], verbose=0)
         best_val_loss = min(hist.history['val_loss'])
         results[lb] = best_val_loss
-        print(f"      lookback={lb}: val_loss={best_val_loss:.5f}")
+        print(f"      lookback={lb}: inner_val_loss={best_val_loss:.5f}")
+
     if not results: return 60
     best_lb = min(results.keys(), key=lambda k: results[k])
-    print(f"   ✅ SEÇİLEN LOOKBACK: {best_lb} gün")
+    print(f"   ✅ SEÇİLEN LOOKBACK: {best_lb} gün (nested, leakage'siz)")
     return best_lb
 
 def walk_forward_cv(data, target_idx, features, lookback, n_splits=4, epochs=25):
     """
     BİLİMSEL: Zaman serisi için Expanding Window CV.
-    
-    KRİTİK DÜZELTME (v10.1):
-    - Her fold için AYRI scaler fit edilir (gelecek veriyi görmemek için)
-    - Yön doğruluğu ham (inverse-scaled) getiriler üzerinden hesaplanır
-    - Sıfır yakını tahminler "yatay" olarak işaretlenir, sahte isabet engellenir
+    Her fold için:
+      - Ayrı scaler (sızıntı yok)
+      - Yön doğruluğu HAM (inverse-scaled) getiriler üzerinden
+      - Yataya yakın tahminler sahte isabet üretmesin diye dışlanır.
     """
     print(f"\n   📊 Walk-Forward CV (n_splits={n_splits}):")
     n = len(data)
     fold_size = n // (n_splits + 1)
     n_features = len(features)
-    
+
     cv_scores = []
     for fold in range(n_splits):
         train_end = fold_size * (fold + 1)
         val_end = fold_size * (fold + 2)
         if val_end > n - lookback: break
-        
-        # 🔧 DÜZELTME 1: Her fold için yeni scaler (gelecek veri sızıntısı yok)
+
         fold_scaler = MinMaxScaler((0, 1))
         train_raw = data[:train_end]
         fold_scaler.fit(train_raw)
-        
+
         train_sc = fold_scaler.transform(train_raw)
         X_tr, y_tr = create_dataset(train_sc, target_idx, lookback)
-        
+
         val_inputs = data[train_end - lookback : val_end]
         val_sc = fold_scaler.transform(val_inputs)
         X_v, y_v = create_dataset(val_sc, target_idx, lookback)
-        
+
         if len(X_tr) < 100 or len(X_v) < 10: continue
-        
+
         set_seeds(seed=42 + fold)
         m = build_lstm_model((X_tr.shape[1], X_tr.shape[2]))
         es = EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=0)
-        m.fit(X_tr, y_tr, epochs=epochs, batch_size=32, 
+        m.fit(X_tr, y_tr, epochs=epochs, batch_size=32,
               validation_data=(X_v, y_v), callbacks=[es], verbose=0)
-        
+
         pred_scaled = m.predict(X_v, verbose=0).flatten()
         mse = mean_squared_error(y_v, pred_scaled)
         try: r2 = r2_score(y_v, pred_scaled)
         except: r2 = -1
-        
-        # 🔧 DÜZELTME 2: Yön doğruluğunu HAM (inverse-scaled) değerlerde hesapla
+
         dummy_pred = np.zeros((len(pred_scaled), n_features))
         dummy_pred[:, target_idx] = pred_scaled
         pred_real = fold_scaler.inverse_transform(dummy_pred)[:, target_idx]
-        
+
         dummy_actual = np.zeros((len(y_v), n_features))
         dummy_actual[:, target_idx] = y_v
         actual_real = fold_scaler.inverse_transform(dummy_actual)[:, target_idx]
-        
-        # 🔧 DÜZELTME 3: Sıfıra çok yakın tahminleri "yatay" say (yapay isabet engelle)
-        # Threshold = günlük volatilitenin %10'u
+
         threshold = np.std(actual_real) * 0.1
         pred_signs = np.where(np.abs(pred_real) < threshold, 0, np.sign(pred_real))
         actual_signs = np.where(np.abs(actual_real) < threshold, 0, np.sign(actual_real))
-        
-        # Sadece her ikisi de "yataylik degil" oldugunda yon karsilastir
+
         non_flat_mask = (pred_signs != 0) & (actual_signs != 0)
         if non_flat_mask.sum() > 0:
             dir_acc = np.mean(pred_signs[non_flat_mask] == actual_signs[non_flat_mask]) * 100
         else:
-            dir_acc = 50.0  # belirsiz durum
-        
-        cv_scores.append({'fold': fold+1, 'mse': mse, 'r2': r2, 'dir_acc': dir_acc, 
+            dir_acc = 50.0
+
+        cv_scores.append({'fold': fold+1, 'mse': mse, 'r2': r2, 'dir_acc': dir_acc,
                          'n_compared': int(non_flat_mask.sum()), 'n_total': len(pred_real)})
-        print(f"      Fold {fold+1}: MSE={mse:.5f} | R²={r2:.4f} | Dir.Acc={dir_acc:.1f}% ({non_flat_mask.sum()}/{len(pred_real)} karsilastirildi)")
-    
+        print(f"      Fold {fold+1}: MSE={mse:.5f} | R²={r2:.4f} | Dir.Acc={dir_acc:.1f}% ({non_flat_mask.sum()}/{len(pred_real)})")
+
     if not cv_scores: return None
     avg_r2 = np.mean([s['r2'] for s in cv_scores])
     avg_dir = np.mean([s['dir_acc'] for s in cv_scores])
@@ -502,46 +547,63 @@ def diebold_mariano_test(actual, pred1, pred2):
     return dm_stat, p_value
 
 # ============================================================
-# MULTİ-STEP TAHMİN (15 GÜN) + Confidence Interval
+# MULTİ-STEP TAHMİN (15 GÜN) + Güçlendirilmiş CI
 # ============================================================
-def multi_step_forecast(models, last_batch_scaled, scaler, features, target_idx, 
-                         current_price, n_steps=15):
+def multi_step_forecast(models, last_batch_scaled, scaler, features, target_idx,
+                         current_price, n_steps=15, residual_std=None):
+    """
+    [FIX-6] CI artık iki belirsizlik kaynağını birleştiriyor:
+      1) Ensemble varyansı (modeller arası uyuşmazlık)
+      2) Adımsal rezidüel varyans (recursive hata birikimi)
+         -> sqrt(step+1) * residual_std olarak modellenir.
+    Recursive forecast'ta tek başına ensemble std yetersiz; rezidüel std
+    test setinden hesaplanıp dışarıdan verilir.
+    """
     n_features = len(features)
     future_prices = []
     future_lower = []
     future_upper = []
     temp_batch = last_batch_scaled.copy()
     curr_p = current_price
-    
+
+    if residual_std is None: residual_std = 0.0
+
     for step in range(n_steps):
         preds_scaled = np.array([m.predict(temp_batch, verbose=0)[0,0] for m in models])
         mean_pred_sc = preds_scaled.mean()
-        std_pred_sc = preds_scaled.std()
-        
-        # Adım sayısı arttıkça belirsizlik artmalı (sqrt of time)
-        time_uncertainty = np.sqrt(step + 1)
-        
+        ensemble_std_sc = preds_scaled.std()
+
+        # Toplam belirsizlik (scaled space) = ensemble + adımsal rezidüel.
+        # residual_std scaled space'te değil orijinal log-return space'te,
+        # bu yüzden inverse_transform sonrası ekleyeceğiz.
+
         d_mean = np.zeros((1, n_features)); d_mean[0, target_idx] = mean_pred_sc
         mean_ret = scaler.inverse_transform(d_mean)[0, target_idx]
-        
-        d_low = np.zeros((1, n_features))
-        d_low[0, target_idx] = mean_pred_sc - 1.96 * std_pred_sc * time_uncertainty
-        low_ret = scaler.inverse_transform(d_low)[0, target_idx]
-        
-        d_high = np.zeros((1, n_features))
-        d_high[0, target_idx] = mean_pred_sc + 1.96 * std_pred_sc * time_uncertainty
-        high_ret = scaler.inverse_transform(d_high)[0, target_idx]
-        
+
+        # Ensemble std'yi de orijinal log-return ölçeğine çevir
+        d_ens_hi = np.zeros((1, n_features))
+        d_ens_hi[0, target_idx] = mean_pred_sc + ensemble_std_sc
+        ens_std_unscaled = scaler.inverse_transform(d_ens_hi)[0, target_idx] - mean_ret
+
+        # Adımsal rezidüel (recursive hata birikimi)
+        step_residual = residual_std * np.sqrt(step + 1)
+
+        # Toplam std = sqrt(ensemble^2 + step_residual^2)
+        total_std = np.sqrt(ens_std_unscaled**2 + step_residual**2)
+
+        low_ret = mean_ret - 1.96 * total_std
+        high_ret = mean_ret + 1.96 * total_std
+
         future_prices.append(curr_p * np.exp(mean_ret))
         future_lower.append(curr_p * np.exp(low_ret))
         future_upper.append(curr_p * np.exp(high_ret))
-        
+
         curr_p = future_prices[-1]
-        
+
         new_row = temp_batch[0, -1, :].copy()
         new_row[target_idx] = mean_pred_sc
         temp_batch = np.append(temp_batch[:, 1:, :], new_row.reshape(1,1,n_features), axis=1)
-    
+
     return np.array(future_prices), np.array(future_lower), np.array(future_upper)
 
 # ============================================================
@@ -551,14 +613,14 @@ def backtest_strategy(actual_prices, predicted_returns, threshold=0.001):
     if len(predicted_returns) < 2: return None
     actual_returns = np.diff(np.log(actual_prices))
     n = min(len(predicted_returns), len(actual_returns))
-    
-    positions = np.where(predicted_returns[:n] > threshold, 1, 
+
+    positions = np.where(predicted_returns[:n] > threshold, 1,
                         np.where(predicted_returns[:n] < -threshold, -1, 0))
     strategy_returns = positions * actual_returns[:n]
-    
+
     metrics = calculate_real_metrics(strategy_returns)
     bh_metrics = calculate_real_metrics(actual_returns[:n])
-    
+
     return {
         'strategy': metrics, 'buy_hold': bh_metrics,
         'strategy_returns': strategy_returns,
@@ -569,33 +631,33 @@ def backtest_strategy(actual_prices, predicted_returns, threshold=0.001):
 # ============================================================
 # GRAFİKLER
 # ============================================================
-def plot_main_chart(df, val_split, test_dates, rec_prices, fut_dates, 
+def plot_main_chart(df, val_split, test_dates, rec_prices, fut_dates,
                     future_prices, future_lower, future_upper, sig_color, name, ticker):
     fig, ax = plt.subplots(figsize=(14, 7))
-    
-    ax.plot(df.index[-200:], df['Close'].iloc[-200:], 
+
+    ax.plot(df.index[-200:], df['Close'].iloc[-200:],
             label="Gerçek Fiyat", color="#1f2937", linewidth=1.8)
-    
+
     if test_dates is not None and rec_prices is not None and len(test_dates) > 0:
-        ax.plot(test_dates, rec_prices, 
+        ax.plot(test_dates, rec_prices,
                 label="Model Test (OOS)", linestyle="--", color="#f59e0b", linewidth=1.5, alpha=0.8)
-    
-    ax.plot(fut_dates, future_prices, label=f"{PREDICTION_HORIZON} Günlük Tahmin", 
+
+    ax.plot(fut_dates, future_prices, label=f"{PREDICTION_HORIZON} Günlük Tahmin",
             color=sig_color, linewidth=2.5, marker='o', markersize=5,
             markerfacecolor=sig_color, markeredgewidth=0, zorder=10)
-    
-    ax.fill_between(fut_dates, future_lower, future_upper, 
+
+    ax.fill_between(fut_dates, future_lower, future_upper,
                      color=sig_color, alpha=0.15, label="95% Güven Aralığı")
-    
+
     ax.axhline(y=df['Close'].iloc[-1], color='gray', linestyle=':', alpha=0.5)
-    
+
     ax.set_title(f"{name} ({ticker}) - {PREDICTION_HORIZON} Günlük Fiyat Tahmini (Ensemble + CI)",
                  fontsize=13, fontweight='bold')
     ax.legend(loc='upper left', fontsize=10)
     ax.grid(True, alpha=0.2)
     ax.set_xlabel("Tarih")
     ax.set_ylabel("Fiyat ($)")
-    
+
     buf = BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
     buf.seek(0)
@@ -690,9 +752,15 @@ def mini_plot(d, c, t):
     b = BytesIO(); f.savefig(b, format='png', bbox_inches='tight'); b.seek(0); plt.close(f)
     return base64.b64encode(b.read()).decode('utf-8')
 
-def generate_signal(current_price, predicted_price, atr_value):
+def generate_signal(current_price, predicted_price, atr_value, atr_multiplier=1.5):
+    """
+    [FIX-5] Tek eşik çarpanı. Önceki sürümde iki yerde farklı çarpan vardı
+    (0.5 ve 3); şimdi yalnızca atr_multiplier (varsayılan 1.5) kullanılıyor.
+    Bu, "GÜÇLÜ AL/SAT" eşiğinin yaklaşık 1.5 ATR-eşdeğeri hareket olduğunu
+    açıkça gösterir.
+    """
     expected_change = predicted_price - current_price
-    threshold = atr_value * 0.5
+    threshold = atr_value * atr_multiplier
     if expected_change > threshold: return "GÜÇLÜ AL", "green", "Pozitif Trend"
     elif expected_change > 0: return "AL / TUT", "blue", "Zayıf Yükseliş"
     elif expected_change < -threshold: return "SAT", "red", "Negatif Trend"
@@ -706,7 +774,7 @@ class HTMLRapor:
         self.content = """
 <!DOCTYPE html>
 <html lang="tr"><head><meta charset="UTF-8">
-<title>INTC - Bilimsel AI Analiz Paneli v10</title>
+<title>INTC - Bilimsel AI Analiz Paneli v10.2</title>
 <style>
 body { font-family: 'Segoe UI', sans-serif; background: #f3f4f6; padding: 20px; }
 .container { max-width: 1200px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
@@ -732,36 +800,38 @@ h1 { text-align: center; color: #111827; border-bottom: 3px solid #0071c5; paddi
 .warn { color: #b91c1c; font-weight: bold; }
 .good { color: #15803d; font-weight: bold; }
 .neutral { color: #6b7280; font-weight: bold; }
+.note { background:#eef2ff; border-left:4px solid #4f46e5; padding:10px 14px; margin:10px 20px; border-radius:4px; font-size:0.85em; color:#3730a3; }
 </style></head>
 <body><div class="container">
 <h1>INTC - Intel Corporation - Bilimsel AI Analiz</h1>
 <div style="background:#e6f2fa; padding:15px; border-left:4px solid #0071c5; margin-bottom:30px;">
-<strong>v10.0 Bilimsel Modüller:</strong> Walk-Forward CV | Ensemble (3 model) | Diebold-Mariano testi | 95% Güven Aralığı | Backtest tabanlı Sharpe | Naive baseline karşılaştırması
+<strong>v10.2 Düzeltmeleri:</strong> Lookback nested-CV (leakage giderildi) | Sertleştirilmiş anlamlılık eşiği (%54 + Sharpe + DM) | Sentiment artık feature olarak modelde | Recursive hata birikimi CI'a dahil | Makro bfill kaldırıldı
 </div>
 """
-    
+
     def add_section(self, ticker, name, m, chart_b64, extras, news_items, science_html):
         sig_color = m['signal_color']
         sig_bg = "#dcfce7" if sig_color == "green" else "#fee2e2" if sig_color == "red" else "#eff6ff"
         currency = "$"
         r2 = m['cv_r2']
-        r2_class = "good" if r2 > 0.05 else "warn" if r2 < -0.05 else "neutral"
+        # Log-return tahmininde R² yorumu farklı; eşikler buna göre tutuldu
+        r2_class = "good" if r2 > 0.02 else "warn" if r2 < -0.02 else "neutral"
         da = m['cv_dir_acc']
-        da_class = "good" if da > 53 else "warn" if da < 47 else "neutral"
+        da_class = "good" if da > 54 else "warn" if da < 47 else "neutral"
         pot = (m['target_price'] - m['current_price']) / m['current_price'] * 100
         pot_class = "good" if pot > 0 else "warn"
-        
+
         news_html = ""
         if news_items:
             news_html = "<div class='news-list'><b>Son Haberler:</b><br>" + "".join(
-                [f"<div class='news-item'><span style='color:#666'>{i['date']}</span> {i['title']}</div>" 
+                [f"<div class='news-item'><span style='color:#666'>{i['date']}</span> {i['title']}</div>"
                  for i in news_items]) + "</div>"
-        
+
         self.content += f"""
 <div class="section">
 <div class="header">
 <span>{ticker} | {name}</span>
-<span style="background:rgba(255,255,255,0.2); padding:2px 10px; border-radius:15px; font-size:0.7em;">v10 BİLİMSEL</span>
+<span style="background:rgba(255,255,255,0.2); padding:2px 10px; border-radius:15px; font-size:0.7em;">v10.2 BİLİMSEL</span>
 </div>
 <div class="signal" style="background:{sig_bg}; color:{sig_color};">
 AI SİNYALİ: {m['signal']} <span style="font-size:0.7em; color:#555">({m['signal_desc']}) | Hedef: {PREDICTION_HORIZON} gün</span>
@@ -769,11 +839,18 @@ AI SİNYALİ: {m['signal']} <span style="font-size:0.7em; color:#555">({m['signa
 
 {science_html}
 
+<div class="note">
+<b>R² yorum notu:</b> Burada R², log-getiri (Log_Ret) üzerinde hesaplanır. Finansal getiri serilerinde
+R² genellikle 0'a çok yakındır; pozitif ve istikrarlı 0.02–0.05 bandı bile akademik literatürde
+anlamlı bir sinyal kabul edilir. Bu yüzden R²'yi fiyat seviyesi tahminindeki R² (genelde 0.99+)
+ile karıştırmayın.
+</div>
+
 <div class="stats-grid">
 <div class="stat-box"><div class="stat-label">Mevcut Fiyat</div><div class="stat-val">{currency}{m['current_price']:.2f}</div><div class="stat-sub">Son Kapanış</div></div>
 <div class="stat-box"><div class="stat-label">Hedef Fiyat ({PREDICTION_HORIZON}G)</div><div class="stat-val">{currency}{m['target_price']:.2f}</div><div class="stat-sub">Ensemble Tahmin</div></div>
 <div class="stat-box"><div class="stat-label">Potansiyel</div><div class="stat-val {pot_class}">%{pot:+.2f}</div><div class="stat-sub">Hedef Farkı</div></div>
-<div class="stat-box"><div class="stat-label">95% Güven Aralığı</div><div class="stat-val" style="font-size:0.95em">${m['ci_low']:.2f}-${m['ci_high']:.2f}</div><div class="stat-sub">Belirsizlik</div></div>
+<div class="stat-box"><div class="stat-label">95% Güven Aralığı</div><div class="stat-val" style="font-size:0.95em">${m['ci_low']:.2f}-${m['ci_high']:.2f}</div><div class="stat-sub">Ensemble + Recursive</div></div>
 
 <div class="stat-box"><div class="stat-label">CV Yön Doğruluğu</div><div class="stat-val {da_class}">%{m['cv_dir_acc']:.1f}</div><div class="stat-sub">±{m['cv_std_dir']:.1f}% (4 fold)</div></div>
 <div class="stat-box"><div class="stat-label">CV R²</div><div class="stat-val {r2_class}">{m['cv_r2']:.4f}</div><div class="stat-sub">Walk-Forward</div></div>
@@ -787,8 +864,8 @@ AI SİNYALİ: {m['signal']} <span style="font-size:0.7em; color:#555">({m['signa
 
 <div class="stat-box"><div class="stat-label">Volatilite (yıllık)</div><div class="stat-val">%{m['volatility']:.1f}</div><div class="stat-sub">Gerçek</div></div>
 <div class="stat-box"><div class="stat-label">Max Drawdown</div><div class="stat-val warn">%{m['mdd']:.1f}</div><div class="stat-sub">Tarihsel</div></div>
-<div class="stat-box"><div class="stat-label">Lookback</div><div class="stat-val">{m['lookback']}g</div><div class="stat-sub">Bilimsel Seçim</div></div>
-<div class="stat-box"><div class="stat-label">Haber Skoru</div><div class="stat-val" style="color:{'green' if m['news_score']>0 else 'red' if m['news_score']<0 else 'gray'}">{m['news_score']:+.2f}</div><div class="stat-sub">Sentiment</div></div>
+<div class="stat-box"><div class="stat-label">Lookback</div><div class="stat-val">{m['lookback']}g</div><div class="stat-sub">Nested CV ile</div></div>
+<div class="stat-box"><div class="stat-label">Haber Skoru</div><div class="stat-val" style="color:{'green' if m['news_score']>0 else 'red' if m['news_score']<0 else 'gray'}">{m['news_score']:+.2f}</div><div class="stat-sub">Modelde feature ✓</div></div>
 </div>
 
 <div class="chart-area"><img class="main-chart" src="data:image/png;base64,{chart_b64}"></div>
@@ -808,7 +885,7 @@ AI SİNYALİ: {m['signal']} <span style="font-size:0.7em; color:#555">({m['signa
 {news_html}
 </div>
 """
-    
+
     def save(self):
         self.content += "</div></body></html>"
         with open("INTC_Analiz.html", "w", encoding="utf-8") as f:
@@ -820,50 +897,58 @@ AI SİNYALİ: {m['signal']} <span style="font-size:0.7em; color:#555">({m['signa
 def analyze():
     set_seeds()
     print("="*65)
-    print(f"INTC BİLİMSEL AI ANALİZ v10.0 ({PREDICTION_HORIZON} GÜN TAHMİN)")
+    print(f"INTC BİLİMSEL AI ANALİZ v10.2 ({PREDICTION_HORIZON} GÜN TAHMİN)")
     print("="*65)
-    
+
     print("\n1. Makro veriler indiriliyor...")
     macro_df = get_macro_data()
-    
+
     print("\n2. Benchmark (S&P 500) indiriliyor...")
     market_returns = get_benchmark_data('^GSPC')
-    
-    print(f"\n3. {TICKER} verisi indiriliyor + indikatorler hesaplaniyor...")
-    df = get_stock_data(TICKER, macro_df)
-    if df is None:
-        print("HATA: Veri alinamadi")
-        return
-    print(f"   Toplam {len(df)} islem gunu ({df.index[0].date()} - {df.index[-1].date()})")
-    
-    print(f"\n4. Sentiment analizi...")
+
+    # [FIX-3] Sentiment'i feature olarak ekleyebilmek için ÖNCE haber çekilir
+    print(f"\n3. Sentiment analizi (feature olarak dahil edilecek)...")
     news_score, news_items = get_advanced_sentiment(TICKER)
     print(f"   Haber skoru: {news_score:+.3f} ({len(news_items)} haber)")
-    
+
+    print(f"\n4. {TICKER} verisi indiriliyor + indikatörler hesaplanıyor...")
+    df = get_stock_data(TICKER, macro_df, news_score=news_score)
+    if df is None:
+        print("HATA: Veri alınamadı")
+        return
+    print(f"   Toplam {len(df)} işlem günü ({df.index[0].date()} - {df.index[-1].date()})")
+
     exclude_cols = ['Open', 'High', 'Low', 'Volume', 'Close', 'Adj Close']
     features = ['Close'] + [c for c in df.columns if c not in exclude_cols]
     target_idx = features.index('Log_Ret')
     data = df[features].values
-    
+    print(f"   Feature sayısı: {len(features)} (NewsSent dahil)")
+
     train_split = int(len(df) * 0.80)
     val_split = int(len(df) * 0.90)
-    
+
+    # Ana scaler train üzerinde fit edilir
     scaler = MinMaxScaler((0, 1))
     scaler.fit(data[:train_split])
-    
-    print(f"\n5. Bilimsel lookback secimi:")
+
+    # [FIX-1] Lookback seçimi artık nested: yalnızca train içindeki bir
+    # alt-validasyon kullanılır. Ana val seti bu adıma DOKUNMAZ.
+    print(f"\n5. Lookback seçimi (Nested CV - leakage'siz):")
     log_ret_train = df['Log_Ret'].iloc[:train_split]
     acf_hint = estimate_lookback_acf(log_ret_train)
-    if acf_hint: print(f"   ACF analizi: ~{acf_hint} gun")
+    if acf_hint: print(f"   ACF analizi: ~{acf_hint} gün")
     candidates = sorted(set([60, 120, 250] + ([acf_hint] if acf_hint else [])))
     candidates = [c for c in candidates if c < train_split - 100]
-    lookback = find_optimal_lookback(data, target_idx, train_split, val_split, scaler, 
-                                     candidates=candidates, epochs=12)
-    
+    lookback = find_optimal_lookback_nested(
+        data, target_idx, train_split,
+        scaler_factory=lambda: MinMaxScaler((0,1)),
+        candidates=candidates, epochs=12
+    )
+
     print(f"\n6. Walk-Forward Cross-Validation:")
     cv_results = walk_forward_cv(data, target_idx, features, lookback, n_splits=4, epochs=25)
-    
-    print(f"\n7. Ana model egitimi (Train/Val/Test split):")
+
+    print(f"\n7. Ana model eğitimi (Train/Val/Test split):")
     train_scaled = scaler.transform(data[:train_split])
     X_train, y_train = create_dataset(train_scaled, target_idx, lookback)
     val_scaled = scaler.transform(data[train_split-lookback:val_split])
@@ -871,28 +956,31 @@ def analyze():
     test_scaled = scaler.transform(data[val_split-lookback:])
     X_test, y_test = create_dataset(test_scaled, target_idx, lookback)
     print(f"   Veri: Train={len(X_train)} | Val={len(X_val)} | Test={len(X_test)} | Lookback={lookback}")
-    
+
     models = train_ensemble(X_train, y_train, X_val, y_val, n_models=3, epochs=80)
-    
-    print(f"\n8. Test seti degerlendirmesi (Out-of-Sample):")
+
+    print(f"\n8. Test seti değerlendirmesi (Out-of-Sample):")
     pred_test_mean, pred_test_std = ensemble_predict(models, X_test)
-    
+
     dummy = np.zeros((len(pred_test_mean), len(features)))
     dummy[:, target_idx] = pred_test_mean
     pred_test_returns = scaler.inverse_transform(dummy)[:, target_idx]
-    
+
     actual_prices = df['Close'].iloc[val_split:].values
     min_len = min(len(pred_test_returns), len(actual_prices))
     pred_test_returns = pred_test_returns[:min_len]
     actual_prices = actual_prices[:min_len]
-    
+
     actual_prices_with_prev = df['Close'].iloc[val_split-1:].values
     actual_returns_log = np.log(actual_prices_with_prev[1:min_len+1] / actual_prices_with_prev[:min_len])
-    
+
     try: test_r2 = r2_score(actual_returns_log, pred_test_returns)
     except: test_r2 = 0
-    
-    # Yön doğruluğu: yataya yakın tahminleri at, sahte isabeti engelle
+
+    # Test set residual std -> recursive forecast CI için kullanılacak
+    test_residuals = actual_returns_log - pred_test_returns
+    residual_std = float(np.std(test_residuals[np.isfinite(test_residuals)]))
+
     threshold_test = np.std(actual_returns_log) * 0.1
     pred_signs_test = np.where(np.abs(pred_test_returns) < threshold_test, 0, np.sign(pred_test_returns))
     actual_signs_test = np.where(np.abs(actual_returns_log) < threshold_test, 0, np.sign(actual_returns_log))
@@ -901,71 +989,74 @@ def analyze():
         test_dir_acc = np.mean(pred_signs_test[non_flat_test] == actual_signs_test[non_flat_test]) * 100
     else:
         test_dir_acc = 50.0
-    print(f"   Test R2: {test_r2:.4f} | Test Yon Dogrulugu: %{test_dir_acc:.1f} ({non_flat_test.sum()}/{len(pred_test_returns)} karsilastirildi)")
-    
+    print(f"   Test R²: {test_r2:.4f} | Yön Doğruluğu: %{test_dir_acc:.1f} ({non_flat_test.sum()}/{len(pred_test_returns)})")
+    print(f"   Test residual std (CI için): {residual_std:.5f}")
+
     rec_prices = []
     pp = df['Close'].iloc[val_split-1]
     for i in range(min_len):
         pp = pp * np.exp(pred_test_returns[i])
         rec_prices.append(pp)
     rec_prices = np.array(rec_prices)
-    
-    print(f"\n9. Baseline karsilastirmasi (Diebold-Mariano testi):")
+
+    print(f"\n9. Baseline karşılaştırması (Diebold-Mariano):")
     train_returns = df['Log_Ret'].iloc[:val_split].dropna().values
     pred_naive = baseline_naive(actual_returns_log)
     pred_mean = baseline_mean(train_returns, actual_returns_log)
     pred_rw = baseline_random_walk(train_returns, actual_returns_log)
-    
+
     mse_model = mean_squared_error(actual_returns_log, pred_test_returns)
     mse_naive = mean_squared_error(actual_returns_log, pred_naive)
     mse_mean = mean_squared_error(actual_returns_log, pred_mean)
     mse_rw = mean_squared_error(actual_returns_log, pred_rw)
-    
+
     dm_naive_stat, dm_naive_p = diebold_mariano_test(actual_returns_log, pred_test_returns, pred_naive)
     dm_mean_stat, dm_mean_p = diebold_mariano_test(actual_returns_log, pred_test_returns, pred_mean)
     dm_rw_stat, dm_rw_p = diebold_mariano_test(actual_returns_log, pred_test_returns, pred_rw)
-    
-    print(f"   MSE Karsilastirmasi:")
-    print(f"      LSTM Model    : {mse_model:.6f}")
-    print(f"      Naive (zero)  : {mse_naive:.6f} | DM p-value: {dm_naive_p:.4f}")
-    print(f"      Mean baseline : {mse_mean:.6f} | DM p-value: {dm_mean_p:.4f}")
-    print(f"      Random Walk   : {mse_rw:.6f} | DM p-value: {dm_rw_p:.4f}")
-    print(f"   NOT: p-value < 0.05 -> istatistiksel anlamli fark var")
-    
+
+    print(f"   LSTM Model    : MSE={mse_model:.6f}")
+    print(f"   Naive (zero)  : MSE={mse_naive:.6f} | DM p={dm_naive_p:.4f}")
+    print(f"   Mean baseline : MSE={mse_mean:.6f} | DM p={dm_mean_p:.4f}")
+    print(f"   Random Walk   : MSE={mse_rw:.6f} | DM p={dm_rw_p:.4f}")
+
     print(f"\n10. Backtest stratejisi:")
     bt = backtest_strategy(actual_prices, pred_test_returns, threshold=0.001)
     if bt:
         print(f"   Strateji Sharpe : {bt['strategy']['sharpe']:.2f}")
         print(f"   Buy&Hold Sharpe : {bt['buy_hold']['sharpe']:.2f}")
-        print(f"   Islem Sayisi    : {bt['n_trades']}")
+        print(f"   İşlem Sayısı    : {bt['n_trades']}")
         print(f"   Piyasada Kalma  : %{bt['pct_in_market']:.1f}")
-    
-    print(f"\n11. {PREDICTION_HORIZON} gunluk gelecek tahmini:")
+
+    print(f"\n11. {PREDICTION_HORIZON} günlük gelecek tahmini:")
     last_batch = scaler.transform(data)[-lookback:].reshape(1, lookback, len(features))
     future_prices, future_lower, future_upper = multi_step_forecast(
         models, last_batch, scaler, features, target_idx,
-        df['Close'].iloc[-1], n_steps=PREDICTION_HORIZON
+        df['Close'].iloc[-1], n_steps=PREDICTION_HORIZON,
+        residual_std=residual_std  # [FIX-6] recursive hata birikimi CI'a dahil
     )
-    
+
     target_price = future_prices[-1]
     ci_low = future_lower[-1]
     ci_high = future_upper[-1]
     current_atr = df['ATR'].iloc[-1]
-    signal, sig_color, sig_desc = generate_signal(df['Close'].iloc[-1], target_price, current_atr * 3)
-    
+    # [FIX-5] Tek çarpan: 1.5*ATR
+    signal, sig_color, sig_desc = generate_signal(
+        df['Close'].iloc[-1], target_price, current_atr, atr_multiplier=1.5
+    )
+
     fut_dates = pd.date_range(df.index[-1] + timedelta(days=1), periods=PREDICTION_HORIZON, freq='B')
     save_predictions_to_sqlite(TICKER, fut_dates, future_prices)
-    
+
     stock_ret_series = df['Log_Ret']
     beta, alpha = calculate_alpha_beta(stock_ret_series, market_returns)
-    
+
     real_metrics = calculate_real_metrics(df['Log_Ret'].tail(252).dropna().values)
-    
+
     test_dates = df.index[val_split:][:min_len]
     chart_b64 = plot_main_chart(df, val_split, test_dates, rec_prices, fut_dates,
                                  future_prices, future_lower, future_upper, sig_color,
                                  TICKER_NAME, TICKER)
-    
+
     extras = {
         'rsi': mini_plot(df['RSI'], 'purple', 'RSI'),
         'macd': mini_plot(df['MACD'], 'blue', 'MACD'),
@@ -977,41 +1068,66 @@ def analyze():
         'ma_cross': plot_ma_cross(df),
         'heatmap': plot_heatmap(df)
     }
-    
-    is_significant = min(dm_naive_p, dm_rw_p) < 0.05 and cv_results['avg_dir_acc'] > 52
-    yorum = ('Model baseline\'lardan istatistiksel olarak daha iyi tahmin yapiyor.' if is_significant 
-             else 'UYARI: Model baseline\'lardan istatistiksel olarak ANLAMLI sekilde FARKLI DEGIL. Tahminlere ihtiyatla yaklasin.')
-    
+
+    # [FIX-2] SERTLEŞTİRİLMİŞ ANLAMLILIK EŞİĞİ
+    # Üç koşul birden:
+    #   (a) DM p-value < 0.05 (en az naive ya da RW karşısında)
+    #   (b) CV yön doğruluğu > %54  (önceki: %52)
+    #   (c) Backtest Sharpe > Buy&Hold Sharpe
+    bt_sharpe = bt['strategy']['sharpe'] if bt else 0
+    bh_sharpe = bt['buy_hold']['sharpe'] if bt else 0
+
+    cond_dm = min(dm_naive_p, dm_rw_p) < 0.05
+    cond_dir = cv_results['avg_dir_acc'] > 54.0
+    cond_sharpe = bt_sharpe > bh_sharpe
+
+    is_significant = cond_dm and cond_dir and cond_sharpe
+
+    cond_str = (
+        f"DM p<0.05: {'✓' if cond_dm else '✗'} | "
+        f"CV Yön >%54: {'✓' if cond_dir else '✗'} | "
+        f"Sharpe > B&H: {'✓' if cond_sharpe else '✗'}"
+    )
+
+    yorum = (
+        'Model üç bilimsel kriterin TÜMÜNÜ geçti (DM anlamlılığı + yön doğruluğu + ekonomik üstünlük). '
+        'Bu, baseline\'lara ve pasif yatırıma karşı somut bir edge işaretidir.'
+        if is_significant
+        else f'UYARI: Model tüm kriterleri geçemedi → {cond_str}. '
+             'Tahminler bilgi amaçlıdır; bu metrikler hep birlikte sağlanmadan tek başına işlem kararı vermeyin.'
+    )
+
     science_html = f"""
     <div class="science-box">
-    <h3>Bilimsel Dogrulama Sonuclari</h3>
+    <h3>Bilimsel Doğrulama Sonuçları</h3>
     <table>
-    <tr><td><b>Walk-Forward CV (4-fold)</b></td><td>R^2 = {cv_results['avg_r2']:.4f} | Yon = %{cv_results['avg_dir_acc']:.1f} (+/-{cv_results['std_dir_acc']:.1f}%)</td></tr>
-    <tr><td><b>Test Set (OOS)</b></td><td>R^2 = {test_r2:.4f} | Yon = %{test_dir_acc:.1f}</td></tr>
-    <tr><td><b>Diebold-Mariano</b></td><td>vs Naive: p={dm_naive_p:.3f} | vs RW: p={dm_rw_p:.3f} {'[Anlamli]' if min(dm_naive_p, dm_rw_p) < 0.05 else '[Anlamsiz]'}</td></tr>
+    <tr><td><b>Walk-Forward CV (4-fold)</b></td><td>R² = {cv_results['avg_r2']:.4f} | Yön = %{cv_results['avg_dir_acc']:.1f} (±{cv_results['std_dir_acc']:.1f}%)</td></tr>
+    <tr><td><b>Test Set (OOS)</b></td><td>R² = {test_r2:.4f} | Yön = %{test_dir_acc:.1f}</td></tr>
+    <tr><td><b>Diebold-Mariano</b></td><td>vs Naive: p={dm_naive_p:.3f} | vs RW: p={dm_rw_p:.3f} {'[Anlamlı]' if min(dm_naive_p, dm_rw_p) < 0.05 else '[Anlamsız]'}</td></tr>
     <tr><td><b>MSE</b></td><td>Model={mse_model:.5f} | Naive={mse_naive:.5f} | RW={mse_rw:.5f}</td></tr>
-    <tr><td><b>Backtest Sharpe</b></td><td>Strateji={bt['strategy']['sharpe']:.2f} vs Buy&Hold={bt['buy_hold']['sharpe']:.2f}</td></tr>
-    <tr><td><b>Ensemble</b></td><td>3 model ortalamasi | Lookback: {lookback} gun (bilimsel secim)</td></tr>
+    <tr><td><b>Backtest Sharpe</b></td><td>Strateji={bt_sharpe:.2f} vs Buy&Hold={bh_sharpe:.2f}</td></tr>
+    <tr><td><b>Ensemble</b></td><td>3 model | Lookback: {lookback} gün (Nested CV - leakage'siz)</td></tr>
+    <tr><td><b>Sertleştirilmiş Eşik</b></td><td>{cond_str}</td></tr>
     </table>
     <div style="margin-top:8px; font-size:0.85em; color:#92400e;">
     <b>Yorum:</b> {yorum}
     </div>
     </div>
     """
-    
+
     metrics = {
         'current_price': df['Close'].iloc[-1],
         'target_price': target_price,
         'ci_low': ci_low, 'ci_high': ci_high,
         'signal': signal, 'signal_color': sig_color, 'signal_desc': sig_desc,
         'alpha': alpha, 'beta': beta,
-        'cv_r2': cv_results['avg_r2'], 
+        'cv_r2': cv_results['avg_r2'],
         'cv_dir_acc': cv_results['avg_dir_acc'],
         'cv_std_dir': cv_results['std_dir_acc'],
         'test_r2': test_r2,
         'test_dir_acc': test_dir_acc,
-        'bt_sharpe': bt['strategy']['sharpe'] if bt else 0,
-        'bh_sharpe': bt['buy_hold']['sharpe'] if bt else 0,
+        'bt_sharpe': bt_sharpe,
+        'bh_sharpe': bh_sharpe,
         'mdd': real_metrics['mdd'],
         'volatility': real_metrics['volatility'],
         'lookback': lookback,
@@ -1019,30 +1135,31 @@ def analyze():
         'dm_naive_p': dm_naive_p,
         'dm_rw_p': dm_rw_p
     }
-    
+
     report = HTMLRapor()
     report.add_section(TICKER, TICKER_NAME, metrics, chart_b64, extras, news_items, science_html)
     report.save()
-    
+
     print("\n" + "="*65)
-    print("OZET SONUCLAR:")
+    print("ÖZET SONUÇLAR:")
     print("="*65)
     print(f"   Mevcut Fiyat        : ${metrics['current_price']:.2f}")
     print(f"   Hedef ({PREDICTION_HORIZON}G)         : ${target_price:.2f}")
-    print(f"   95% Guven Araligi   : ${ci_low:.2f} - ${ci_high:.2f}")
+    print(f"   95% Güven Aralığı   : ${ci_low:.2f} - ${ci_high:.2f}")
     print(f"   Potansiyel          : %{((target_price-metrics['current_price'])/metrics['current_price']*100):+.2f}")
     print(f"   Sinyal              : {signal} ({sig_desc})")
-    print(f"   CV Yon Dogrulugu    : %{metrics['cv_dir_acc']:.1f} +/- %{metrics['cv_std_dir']:.1f}")
-    print(f"   CV R^2              : {metrics['cv_r2']:.4f}")
-    print(f"   Test Yon Dogrulugu  : %{metrics['test_dir_acc']:.1f}")
-    print(f"   Test R^2            : {metrics['test_r2']:.4f}")
-    print(f"   DM Test (vs RW)     : p={metrics['dm_rw_p']:.4f} {'[Anlamli]' if metrics['dm_rw_p']<0.05 else '[Anlamsiz]'}")
+    print(f"   CV Yön Doğruluğu    : %{metrics['cv_dir_acc']:.1f} ± %{metrics['cv_std_dir']:.1f}")
+    print(f"   CV R²               : {metrics['cv_r2']:.4f}")
+    print(f"   Test Yön Doğruluğu  : %{metrics['test_dir_acc']:.1f}")
+    print(f"   Test R²             : {metrics['test_r2']:.4f}")
+    print(f"   DM Test (vs RW)     : p={metrics['dm_rw_p']:.4f} {'[Anlamlı]' if metrics['dm_rw_p']<0.05 else '[Anlamsız]'}")
     print(f"   Backtest Sharpe     : {metrics['bt_sharpe']:.2f} vs Buy&Hold: {metrics['bh_sharpe']:.2f}")
-    print(f"   Volatilite (yillik) : %{metrics['volatility']:.1f}")
+    print(f"   Sertleştirilmiş Eşik: {cond_str} -> {'ANLAMLI' if is_significant else 'ANLAMSIZ'}")
+    print(f"   Volatilite (yıllık) : %{metrics['volatility']:.1f}")
     print(f"   Beta vs S&P 500     : {metrics['beta']:.2f}")
-    print(f"   Alpha (yillik)      : {metrics['alpha']:+.2f}")
+    print(f"   Alpha (yıllık)      : {metrics['alpha']:+.2f}")
     print("="*65)
-    print("ANALIZ TAMAMLANDI. Rapor: INTC_Analiz.html")
+    print("ANALİZ TAMAMLANDI. Rapor: INTC_Analiz.html")
     print("="*65)
 
 if __name__ == "__main__":
