@@ -1,8 +1,6 @@
 # ============================================================
-# MULTI-STOCK v15.1 — REGIME-SWITCHING MARKET-NEUTRAL FRAMEWORK
-# (INTC, AMD, NVDA Entegrasyonu + SQLite İyileştirmeleri)
+# MULTI-STOCK v16.5 — REGIME-SWITCHING & EWT FORECASTING
 # ============================================================
-
 import sys, os, sqlite3, warnings, random, base64, json
 from io import BytesIO
 from datetime import datetime, timedelta
@@ -10,7 +8,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') # Sunucu ortamı uyumluluğu için
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
@@ -33,202 +31,120 @@ warnings.filterwarnings('ignore')
 # 🎯 KONFİGÜRASYON 
 # ============================================================
 TICKERS_CONFIG = {
-    'INTC': {
-        'name': 'Intel Corporation',
-        'benchmark': 'SOXX',
-        'sector': 'semiconductors',
-    },
-    'AMD': {
-        'name': 'Advanced Micro Devices',
-        'benchmark': 'SOXX',
-        'sector': 'semiconductors',
-    },
-    'NVDA': {
-        'name': 'NVIDIA Corporation',
-        'benchmark': 'SOXX',
-        'sector': 'semiconductors',
-    }
+    'INTC': {'name': 'Intel Corporation', 'benchmark': 'SOXX'},
+    'AMD':  {'name': 'Advanced Micro Devices', 'benchmark': 'SOXX'},
+    'NVDA': {'name': 'NVIDIA Corporation', 'benchmark': 'SOXX'}
 }
 
-# Genel parametreler
 PREDICTION_HORIZON = 7
-TRANSACTION_COST_BPS = 5
 LOOKBACK = 60
 TRAIN_FRAC = 0.80
-VAL_FRAC = 0.10  # Test = 0.10
-ENSEMBLE_SEEDS = [42, 52, 62]  # 3-model ensemble per regime
+VAL_FRAC = 0.10 
+ENSEMBLE_SEEDS = [42, 52, 62]  
 EPOCHS = 60
 
-# --- DB ---
+# --- DB AYARLARI ---
 DB_FOLDER = r"C:\Projects\ML"
-DB_NAME = "data_multi_v15_1.db"
-DB_PATH = os.path.join(DB_FOLDER, DB_NAME)
+DB_PATH = os.path.join(DB_FOLDER, "market_intelligence_v16.db")
 
 def init_db():
-    if not os.path.exists(DB_FOLDER):
-        os.makedirs(DB_FOLDER)
+    if not os.path.exists(DB_FOLDER): os.makedirs(DB_FOLDER)
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute('''CREATE TABLE IF NOT EXISTS gunluk_veriler (
-        tarih TEXT, sembol TEXT,
-        acilis REAL, yuksek REAL, dusuk REAL, kapanis REAL, hacim REAL,
-        UNIQUE(tarih, sembol))''')
-    conn.commit()
-    conn.close()
-
-def save_to_db(df, ticker):
-    """İndirilen verileri veritabanına kaydeder."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        temp_df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-        temp_df['sembol'] = ticker
-        temp_df.rename(columns={'Open': 'acilis', 'High': 'yuksek', 'Low': 'dusuk', 
-                                'Close': 'kapanis', 'Volume': 'hacim'}, inplace=True)
-        temp_df.to_sql('gunluk_veriler', conn, if_exists='append', index_label='tarih', method='multi', chunksize=500)
-        conn.close()
-    except Exception as e:
-        pass # Veri zaten varsa (UNIQUE constraint) sessizce geç
+    conn.execute('''CREATE TABLE IF NOT EXISTS signals (
+        tarih TEXT, sembol TEXT, rejim TEXT, signal TEXT, price REAL, 
+        prediction_ret REAL, UNIQUE(tarih, sembol))''')
+    conn.commit(); conn.close()
 
 def set_seeds(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    tf_random.set_seed(seed)
+    random.seed(seed); np.random.seed(seed); tf_random.set_seed(seed)
 
 # ============================================================
-# VERİ
+# 1. VERİ İNDİRME VE HAZIRLIK
 # ============================================================
 def download_pair_data(ticker, benchmark):
     end = datetime.now()
-    start = end - timedelta(days=12*365)
+    start = end - timedelta(days=12*365) # 12 yıllık geniş veri seti
     try:
-        df_stock = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
-        df_bench = yf.download(benchmark, start=start, end=end, progress=False, auto_adjust=False)
-    except Exception as e:
-        print(f"   HATA: {ticker}/{benchmark} indirilemedi: {e}")
-        return None, None
+        s = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        b = yf.download(benchmark, start=start, end=end, progress=False, auto_adjust=False)
+        if s.empty or b.empty: return None, None
         
-    if df_stock is None or df_stock.empty or df_bench is None or df_bench.empty:
-        return None, None
-        
-    if hasattr(df_stock.columns, 'get_level_values'):
-        df_stock.columns = df_stock.columns.get_level_values(0)
-    if hasattr(df_bench.columns, 'get_level_values'):
-        df_bench.columns = df_bench.columns.get_level_values(0)
-        
-    df_stock = df_stock[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-    df_bench = df_bench[['Close']].rename(columns={'Close': 'Bench_Close'}).dropna()
-    
-    # DB Kaydı
-    save_to_db(df_stock, ticker)
-    
-    common_idx = df_stock.index.intersection(df_bench.index)
-    return df_stock.loc[common_idx], df_bench.loc[common_idx]
+        if hasattr(s.columns, 'get_level_values'): s.columns = s.columns.get_level_values(0)
+        if hasattr(b.columns, 'get_level_values'): b.columns = b.columns.get_level_values(0)
+            
+        s = s[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+        b = b[['Close']].rename(columns={'Close': 'Bench_Close'}).dropna()
+        common = s.index.intersection(b.index)
+        return s.loc[common], b.loc[common]
+    except: return None, None
 
 def get_macro_data():
-    end = datetime.now()
-    start = end - timedelta(days=12*365)
     tickers = {"^VIX": "VIX", "^TNX": "US_10Y_BOND", "DX-Y.NYB": "DXY"}
     try:
-        df = yf.download(list(tickers.keys()), start=start, end=end, progress=False)['Close']
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.rename(columns=tickers, inplace=True)
-        return df.ffill()
-    except Exception as e:
-        print(f"   UYARI: Makro veri ({e})")
-        return pd.DataFrame()
+        df = yf.download(list(tickers.keys()), period="12y", progress=False)['Close']
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        return df.rename(columns=tickers).ffill()
+    except: return pd.DataFrame()
 
 # ============================================================
-# REJIM TESPİTİ (HİBRİT, 3 REJIM)
+# 2. EWT VE REJİM TESPİT MOTORU
 # ============================================================
-def detect_regime_probabilities(bench_close, window_trend=50, window_long=200, window_vol=20, vol_quantile=0.7):
+def detect_regimes(bench_close):
+    """Benchmark (SOXX) üzerinden piyasa ritmini ve rejimini tespit eder."""
     log_ret = np.log(bench_close / bench_close.shift(1))
-    sma_short = bench_close.rolling(window_trend).mean()
-    sma_long = bench_close.rolling(window_long).mean()
+    sma50 = bench_close.rolling(50).mean()
+    sma200 = bench_close.rolling(200).mean()
     
-    trend_score = (sma_short / sma_long) - 1.0
-    trend_strength = 1.0 / (1.0 + np.exp(-trend_score * 50))  
+    trend_strength = 1.0 / (1.0 + np.exp(-((sma50 / sma200) - 1.0) * 50))  
+    vol = log_ret.rolling(20).std()
+    p_chaos = (1.0 / (1.0 + np.exp(-((vol / vol.expanding().quantile(0.7)) - 1.0) * 5))).clip(0.05, 0.95)  
     
-    vol = log_ret.rolling(window_vol).std()
-    vol_rolling_quantile = vol.expanding(min_periods=252).quantile(vol_quantile)
+    p_bull = (1.0 - p_chaos) * trend_strength
+    p_bear = (1.0 - p_chaos) * (1.0 - trend_strength)
     
-    chaos_signal = (vol / vol_rolling_quantile - 1.0) * 5  
-    p_chaos = 1.0 / (1.0 + np.exp(-chaos_signal))
-    p_chaos = p_chaos.clip(0.05, 0.95)  
-    
-    remaining = 1.0 - p_chaos
-    p_bull = remaining * trend_strength
-    p_bear = remaining * (1.0 - trend_strength)
-    
-    df_regime = pd.DataFrame({
-        'p_bull': p_bull, 'p_bear': p_bear, 'p_chaos': p_chaos,
-        'trend_strength': trend_strength, 'vol_20': vol,
-    }, index=bench_close.index)
-    
-    probs = df_regime[['p_bull', 'p_bear', 'p_chaos']].values
-    df_regime['regime'] = np.array(['bull', 'bear', 'chaos'])[np.argmax(probs, axis=1)]
-    return df_regime
+    df = pd.DataFrame({'p_bull': p_bull, 'p_bear': p_bear, 'p_chaos': p_chaos}, index=bench_close.index)
+    df['regime'] = np.array(['BULL', 'BEAR', 'CHAOS'])[np.argmax(df.values, axis=1)]
+    return df
 
-def rolling_beta(stock_returns, bench_returns, window=60):
-    beta = np.full(len(stock_returns), np.nan)
-    s = stock_returns.values; b = bench_returns.values
-    for i in range(window, len(s)):
-        s_w = s[i-window:i]; b_w = b[i-window:i]
-        if np.std(b_w) == 0: continue
-        cov = np.cov(s_w, b_w)[0, 1]
-        var_b = np.var(b_w)
-        beta[i] = cov / var_b if var_b > 0 else 1.0
-    return pd.Series(beta, index=stock_returns.index)
-
-# ============================================================
-# FEATURE ENGINEERING
-# ============================================================
-def build_features(df_stock, df_bench, macro_df, df_regime):
-    df = df_stock.copy()
-    df['Bench_Close'] = df_bench['Bench_Close']
-    
+def build_features(df_s, df_b, macro_df, df_r):
+    """Elliott Dalga Teorisi ritimlerini (Fibonacci) ve teknik göstergeleri birleştirir."""
+    df = df_s.copy()
+    df['Bench_Close'] = df_b['Bench_Close']
     try:
         import ta
-        df['RSI'] = ta.momentum.RSIIndicator(df['Close'], 14).rsi()
-        df['MACD'] = ta.trend.MACD(df['Close']).macd()
-        df['ATR'] = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close']).average_true_range()
-        df['SMA20'] = ta.trend.SMAIndicator(df['Close'], 20).sma_indicator()
-        df['SMA50'] = ta.trend.SMAIndicator(df['Close'], 50).sma_indicator()
-        df['SMA200'] = ta.trend.SMAIndicator(df['Close'], 200).sma_indicator()
+        # Klasik Göstergeler
+        df['RSI'] = ta.momentum.rsi(df['Close'], 14)
+        df['MACD'] = ta.trend.macd_diff(df['Close'])
+        df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'])
         
+        # EWT Ritim Analizi: Fibonacci Seviyelerine Uzaklık
+        # Son 120 günün (bir major dalga boyu) Fibonacci geri çekilme seviyeleri
+        wave_h = df['High'].rolling(120).max()
+        wave_l = df['Low'].rolling(120).min()
+        wave_range = wave_h - wave_l
+        
+        df['Fib_382'] = (df['Close'] - (wave_h - wave_range * 0.382)) / df['Close']
+        df['Fib_618'] = (df['Close'] - (wave_h - wave_range * 0.618)) / df['Close']
+        
+        # Piyasa Duyarlılığı
         df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
-        df['Vol_20'] = df['Log_Ret'].rolling(20).std()
-        df['Mom_20'] = df['Close'].pct_change(20)
-        
         df['Bench_Log_Ret'] = np.log(df['Bench_Close'] / df['Bench_Close'].shift(1))
-        df['Bench_Mom_20'] = df['Bench_Close'].pct_change(20)
-        df['Bench_Vol_20'] = df['Bench_Log_Ret'].rolling(20).std()
+        cov = df['Log_Ret'].rolling(60).cov(df['Bench_Log_Ret'])
+        var = df['Bench_Log_Ret'].rolling(60).var()
+        df['Beta_60'] = (cov / var).clip(0.0, 3.0)
         
-        df['Rel_Mom_20'] = df['Mom_20'] - df['Bench_Mom_20']
-        df['Rel_Vol_20'] = df['Vol_20'] - df['Bench_Vol_20']
+        # Hedef: Gelecek 7 Günlük 'Artık' (Residual) Getiri
+        f_stock = np.log(df['Close'].shift(-PREDICTION_HORIZON) / df['Close'])
+        f_bench = np.log(df['Bench_Close'].shift(-PREDICTION_HORIZON) / df['Bench_Close'])
+        df['Future_Residual_Ret'] = f_stock - df['Beta_60'] * f_bench
         
-        df['Beta_60'] = rolling_beta(df['Log_Ret'].fillna(0), df['Bench_Log_Ret'].fillna(0), window=60)
-        df['Beta_60'] = df['Beta_60'].clip(0.0, 3.0)
-        
-        # Gelecekteki Residual Getiri (Hedef)
-        future_stock = np.log(df['Close'].shift(-PREDICTION_HORIZON) / df['Close'])
-        future_bench = np.log(df['Bench_Close'].shift(-PREDICTION_HORIZON) / df['Bench_Close'])
-        df['Future_Residual_Ret'] = future_stock - df['Beta_60'] * future_bench
-        
-        df = df.join(df_regime[['p_bull', 'p_bear', 'p_chaos']], how='left')
-        if not macro_df.empty:
-            df = df.join(macro_df, how='left').ffill()
-            
-        df = df.dropna(subset=['Future_Residual_Ret', 'Beta_60', 'p_bull', 'p_bear', 'p_chaos'])
-        df = df.dropna()
+        df = df.join(df_r[['p_bull', 'p_bear', 'p_chaos']], how='left').join(macro_df, how='left').dropna()
         return df
-    except Exception as e:
-        print(f"   HATA Feature engineering: {e}")
-        return None
+    except: return None
 
 # ============================================================
-# MODEL & ENSEMBLE EĞİTİMİ
+# 3. MODELLEME VE EĞİTİM (SOFT ENSEMBLE)
 # ============================================================
 def build_lstm(input_shape):
     m = Sequential([
@@ -236,153 +152,178 @@ def build_lstm(input_shape):
         Bidirectional(LSTM(64, return_sequences=True)),
         Dropout(0.3),
         LSTM(32),
-        Dropout(0.3),
         Dense(16, activation='relu'),
         Dense(1),
     ])
     m.compile(optimizer=Adam(0.001), loss=Huber())
     return m
 
-def create_dataset_clean(X_arr, y_arr, lb):
-    Xs, ys = [], []
-    for i in range(lb, len(X_arr)):
-        Xs.append(X_arr[i-lb:i]); ys.append(y_arr[i])
-    return np.array(Xs), np.array(ys)
+def create_dataset(X, y, lb):
+    return np.array([X[i-lb:i] for i in range(lb, len(X))]), np.array([y[i] for i in range(lb, len(y))])
 
-def train_regime_experts(X_tr, y_tr, X_v, y_v, tr_probs, v_probs_full):
+def train_experts(Xt, yt, Xv, yv, probs, split_idx):
     experts = {}
-    for regime_idx, regime_name in enumerate(['bull', 'bear', 'chaos']):
-        print(f"      🎓 Uzman: {regime_name.upper()} eğitiliyor...")
-        sw = tr_probs[:, regime_idx]
-        sw_norm = np.clip(sw, 0.05, 1.0)
+    for idx, reg in enumerate(['bull', 'bear', 'chaos']):
+        sw = np.clip(probs[LOOKBACK:split_idx, idx], 0.05, 1.0)
+        if sw.sum() < 100: experts[reg] = None; continue
         
-        effective_n = sw_norm.sum()
-        if effective_n < 100:
-            print(f"         ⚠️  Yetersiz veri ({effective_n:.0f}), atlama")
-            experts[regime_name] = None
-            continue
-            
         models = []
-        for sd in ENSEMBLE_SEEDS:
-            set_seeds(sd)
-            m = build_lstm((X_tr.shape[1], X_tr.shape[2]))
-            es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=0)
-            rlr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=0)
-            m.fit(X_tr, y_tr, epochs=EPOCHS, batch_size=32, validation_data=(X_v, y_v), 
-                  sample_weight=sw_norm, callbacks=[es, rlr], verbose=0)
+        for seed in ENSEMBLE_SEEDS:
+            set_seeds(seed)
+            m = build_lstm((Xt.shape[1], Xt.shape[2]))
+            es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+            m.fit(Xt, yt, epochs=EPOCHS, batch_size=32, validation_data=(Xv, yv), 
+                  sample_weight=sw, callbacks=[es], verbose=0)
             models.append(m)
-        experts[regime_name] = models
-        print(f"         ✓ {regime_name}: effective_n={effective_n:.0f}, {len(models)} model")
+        experts[reg] = models
     return experts
 
-def soft_ensemble_predict(experts, X, probs):
-    regime_preds = {}
-    for regime_idx, regime_name in enumerate(['bull', 'bear', 'chaos']):
-        if experts.get(regime_name) is None:
-            regime_preds[regime_name] = np.zeros(len(X))
-            continue
-        preds_per_seed = [m.predict(X, verbose=0).flatten() for m in experts[regime_name]]
-        regime_preds[regime_name] = np.mean(preds_per_seed, axis=0)
-        
-    final = (probs[:, 0] * regime_preds['bull'] + 
-             probs[:, 1] * regime_preds['bear'] + 
-             probs[:, 2] * regime_preds['chaos'])
-    return final
+def ensemble_predict(experts, X, p):
+    res = {}
+    for i, r in enumerate(['bull', 'bear', 'chaos']):
+        if experts.get(r): res[r] = np.mean([m.predict(X, verbose=0).flatten() for m in experts[r]], axis=0)
+        else: res[r] = np.zeros(len(X))
+    return p[:, 0]*res['bull'] + p[:, 1]*res['bear'] + p[:, 2]*res['chaos']
 
 # ============================================================
-# HİSSE BAZLI ANALİZ AKIŞI
+# 4. GÖRSELLEŞTİRME VE RAPORLAMA
+# ============================================================
+def make_professional_charts(ticker, df, val_split, test_actual, test_pred, future_prices):
+    """Geçmiş, Test ve Gelecek Tahminini içeren bilimsel grafik."""
+    plt.figure(figsize=(12, 6))
+    plt.style.use('dark_background')
+    
+    dates = df.index
+    # Son 120 günün geçmişi
+    plt.plot(dates[val_split-120:val_split], df['Close'].iloc[val_split-120:val_split], label='Geçmiş (Dalga)', color='#94a3b8')
+    # Test verisi
+    plt.plot(dates[val_split:], test_actual, label='Test (Gerçek)', color='#22d3ee', alpha=0.8)
+    plt.plot(dates[val_split:], test_pred, label='Test (Model)', color='#f472b6', linestyle='--')
+    
+    # Gelecek Tahmini
+    future_dates = [dates[-1] + timedelta(days=i) for i in range(1, 8)]
+    plt.plot([dates[-1]] + future_dates, [df['Close'].iloc[-1]] + future_prices, 
+             label='7G YZ Tahmini', color='#4ade80', marker='o', linewidth=2)
+    
+    plt.title(f"{ticker} - EWT Ritim & LSTM Tahmin Modeli")
+    plt.legend(); plt.grid(alpha=0.2)
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=120); plt.close()
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+# ============================================================
+# 5. ANA ANALİZ AKIŞI
 # ============================================================
 def analyze_ticker(ticker, config, macro_df):
-    print(f"\n{'='*65}")
-    print(f"📊 {ticker} ({config['name']}) — Regime-Switching Analiz")
-    print(f"{'='*65}")
+    print(f"\n" + "="*65)
+    print(f"📊 {ticker} ({config['name']}) Analizi Başladı")
+    print("="*65)
     
-    df_stock, df_bench = download_pair_data(ticker, config['benchmark'])
-    if df_stock is None: return None
+    df_s, df_b = download_pair_data(ticker, config['benchmark'])
+    if df_s is None: return None
     
-    print("1. Rejim tespit ediliyor...")
-    df_regime = detect_regime_probabilities(df_bench['Bench_Close'])
+    df_r = detect_regimes(df_b['Bench_Close'])
+    df = build_features(df_s, df_b, macro_df, df_r)
+    if df is None: return None
     
-    print("2. Özellik mühendisliği (Feature Engineering) uygulanıyor...")
-    df = build_features(df_stock, df_bench, macro_df, df_regime)
-    if df is None or len(df) < 500: return None
+    f_cols = [c for c in df.columns if c not in ['Open','High','Low','Volume','Close','Bench_Close','Future_Residual_Ret']]
+    X_raw, y_raw = df[f_cols].values, df['Future_Residual_Ret'].values
+    probs = df[['p_bull', 'p_bear', 'p_chaos']].values
     
-    exclude_cols = ['Open', 'High', 'Low', 'Volume', 'Close', 'Bench_Close', 'Future_Residual_Ret']
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
+    train_idx = int(len(df) * TRAIN_FRAC)
+    val_idx = int(len(df) * (TRAIN_FRAC + VAL_FRAC))
     
-    X_data = df[feature_cols].values
-    y_data = df['Future_Residual_Ret'].values
-    probs_arr = df[['p_bull', 'p_bear', 'p_chaos']].values
+    x_sc, y_sc = MinMaxScaler(), MinMaxScaler((-1, 1))
+    X_s = x_sc.fit_transform(X_raw)
+    y_s = y_sc.fit_transform(y_raw.reshape(-1, 1)).flatten()
     
-    train_split = int(len(df) * TRAIN_FRAC)
-    val_split = int(len(df) * (TRAIN_FRAC + VAL_FRAC))
+    Xt, yt = create_dataset(X_s[:train_idx], y_s[:train_idx], LOOKBACK)
+    Xv, yv = create_dataset(X_s[train_idx-LOOKBACK:val_idx], y_s[train_idx-LOOKBACK:val_idx], LOOKBACK)
+    Xte, yte = create_dataset(X_s[val_idx-LOOKBACK:], y_s[val_idx-LOOKBACK:], LOOKBACK)
     
-    x_sc = MinMaxScaler(); x_sc.fit(X_data[:train_split])
-    y_sc = MinMaxScaler((-1, 1)); y_sc.fit(y_data[:train_split].reshape(-1, 1))
+    print("   [Model] Uzmanlar eğitiliyor (EWT Ritimleri İşleniyor)...")
+    experts = train_experts(Xt, yt, Xv, yv, probs, train_idx)
     
-    X_tr_s = x_sc.transform(X_data[:train_split])
-    y_tr_s = y_sc.transform(y_data[:train_split].reshape(-1, 1)).flatten()
-    X_v_s = x_sc.transform(X_data[train_split-LOOKBACK:val_split])
-    y_v_s = y_sc.transform(y_data[train_split-LOOKBACK:val_split].reshape(-1, 1)).flatten()
-    X_te_s = x_sc.transform(X_data[val_split-LOOKBACK:])
-    y_te_s = y_sc.transform(y_data[val_split-LOOKBACK:].reshape(-1, 1)).flatten()
+    # Test Tahmini
+    pred_te_s = ensemble_predict(experts, Xte, probs[val_idx:val_idx+len(yte)])
+    act_res = y_sc.inverse_transform(yte.reshape(-1, 1)).flatten()
+    prd_res = y_sc.inverse_transform(pred_te_s.reshape(-1, 1)).flatten()
     
-    Xt, yt = create_dataset_clean(X_tr_s, y_tr_s, LOOKBACK)
-    Xv, yv = create_dataset_clean(X_v_s, y_v_s, LOOKBACK)
-    Xte, yte = create_dataset_clean(X_te_s, y_te_s, LOOKBACK)
+    # Gelecek 7G Tahmini
+    last_seq = X_s[-LOOKBACK:].reshape(1, LOOKBACK, len(f_cols))
+    last_probs = probs[-1:].reshape(1, 3)
+    future_s = ensemble_predict(experts, last_seq, last_probs)
+    future_ret = float(y_sc.inverse_transform(future_s.reshape(-1, 1))[0,0])
     
-    print("3. Modeller eğitiliyor...")
-    experts = train_regime_experts(Xt, yt, Xv, yv, probs_arr[LOOKBACK:train_split], probs_arr[train_split:val_split])
+    # Sonuçların Fiyata Dönüşümü
+    test_actual_prices = df['Close'].iloc[val_idx:].values * np.exp(act_res)
+    test_pred_prices = df['Close'].iloc[val_idx:].values * np.exp(prd_res)
+    target_price = df['Close'].iloc[-1] * np.exp(future_ret)
     
-    print("4. OOS (Out-of-Sample) Test ve Sinyal Üretimi...")
-    pred_te_s = soft_ensemble_predict(experts, Xte, probs_arr[val_split:val_split+len(yte)])
-    actual_residual = y_sc.inverse_transform(yte.reshape(-1, 1)).flatten()
-    pred_residual = y_sc.inverse_transform(pred_te_s.reshape(-1, 1)).flatten()
+    dir_acc = (np.sign(prd_res) == np.sign(act_res)).mean() * 100
+    std_res = float(np.std(act_res - prd_res))
     
-    dir_acc = (np.sign(pred_residual) == np.sign(actual_residual)).mean() * 100
-    r2 = r2_score(actual_residual, pred_residual)
+    if future_ret > 0.5 * std_res: sig, yon, col = "AL 🚀", "YÜKSELİŞ 📈", "#22c55e"
+    elif future_ret < -0.5 * std_res: sig, yon, col = "SAT 💥", "DÜŞÜŞ 📉", "#ef4444"
+    else: sig, yon, col = "NÖTR 🟡", "YATAY ➡️", "#f59e0b"
     
-    # Gelecek Tahmini (Son 60 gün)
-    last_X = x_sc.transform(X_data)[-LOOKBACK:].reshape(1, LOOKBACK, len(feature_cols))
-    last_probs = probs_arr[-1:].reshape(1, 3)
-    future_pred_s = soft_ensemble_predict(experts, last_X, last_probs)
-    pred_resid_future = float(y_sc.inverse_transform(future_pred_s.reshape(-1, 1))[0, 0])
+    print(f"\n   🎯 [SONUÇLAR]")
+    print(f"    Yön Doğruluğu: %{dir_acc:.1f} | Beklenen Yön: {yon}")
+    print(f"    Hedef Fiyat: ${target_price:.2f} | Sinyal: {sig}")
     
-    residual_std = float(np.std(actual_residual - pred_residual))
+    chart_b64 = make_professional_charts(ticker, df, val_idx, test_actual_prices, test_pred_prices, 
+                                        np.linspace(df['Close'].iloc[-1], target_price, 7).tolist())
     
-    if abs(pred_resid_future) < 0.5 * residual_std:
-        sig = "NÖTR"
-    elif pred_resid_future > 0:
-        sig = "AL" if abs(pred_resid_future) < 1.5 * residual_std else "GÜÇLÜ AL"
-    else:
-        sig = "ZAYIF SAT" if abs(pred_resid_future) < 1.5 * residual_std else "SAT"
-        
     return {
-        'ticker': ticker, 'name': config['name'],
-        'regime': df_regime['regime'].iloc[-1],
-        'dir_acc': dir_acc, 'r2': r2, 'signal': sig, 'pred': pred_resid_future
+        'ticker': ticker, 'name': config['name'], 'price': df['Close'].iloc[-1],
+        'regime': df_r['regime'].iloc[-1], 'acc': dir_acc, 'yon': yon, 'sig': sig, 
+        'target': target_price, 'chart': chart_b64, 'color': col,
+        'p_bull': probs[-1,0], 'p_bear': probs[-1,1], 'p_chaos': probs[-1,2]
     }
 
 # ============================================================
-# ANA ÇALIŞTIRICI
+# 6. MAIN VE RAPOR ÜRETİMİ
 # ============================================================
-if __name__ == "__main__":
-    init_db()
-    set_seeds()
-    print("Makro veriler indiriliyor...")
-    macro_df = get_macro_data()
-    
-    results = []
-    for ticker, config in TICKERS_CONFIG.items():
-        res = analyze_ticker(ticker, config, macro_df)
-        if res:
-            results.append(res)
-            
-    print("\n" + "="*65)
-    print("MULTI-STOCK ÖZET TABLO (v15.1):")
-    print("="*65)
-    print(f"{'TICKER':<10} {'REJİM':<10} {'YÖN DOĞR':<15} {'R²':<10} {'SİNYAL'}")
-    print("-" * 65)
+def generate_final_html(results):
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="tr"><head><meta charset="UTF-8"><title>EWT & LSTM Multi-Stock Analiz</title>
+    <style>
+        body {{ font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
+        .card {{ background: #1e293b; border-radius: 16px; padding: 25px; margin-bottom: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 15px; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 20px; }}
+        .stat {{ background: #0f172a; padding: 15px; border-radius: 8px; text-align: center; }}
+        img {{ width: 100%; border-radius: 12px; margin-top: 20px; border: 1px solid #334155; }}
+    </style></head><body>
+    <h1 style='text-align:center;'>🚀 YZ Destekli EWT Ritim Analiz Raporu</h1>
+    """
     for r in results:
-        print(f"{r['ticker']:<10} {r['regime'].upper():<10} %{r['dir_acc']:<14.1f} {r['r2']:<10.4f} {r['signal']}")
-    print("="*65)
+        html += f"""
+        <div class='card'>
+            <div class='header'>
+                <h2 style='color:#38bdf8;'>{r['ticker']} - {r['name']}</h2>
+                <span style='background:{r['color']}; padding:8px 16px; border-radius:20px; font-weight:bold;'>{r['sig']}</span>
+            </div>
+            <div class='grid'>
+                <div class='stat'><div>Güncel Fiyat</div><div style='font-size:1.4em; font-weight:bold;'>${r['price']:.2f}</div></div>
+                <div class='stat'><div>Hedef Fiyat (7G)</div><div style='font-size:1.4em; color:#4ade80;'>${r['target']:.2f}</div></div>
+                <div class='stat'><div>Beklenen Yön</div><div style='font-weight:bold;'>{r['yon']}</div></div>
+                <div class='stat'><div>Piyasa Rejimi</div><div style='font-weight:bold;'>{r['regime']}</div></div>
+            </div>
+            <img src='data:image/png;base64,{r['chart']}'>
+        </div>
+        """
+    html += "</body></html>"
+    with open("EWT_MultiStock_Analiz.html", "w", encoding="utf-8") as f: f.write(html)
+    print(f"\n[BİLGİ] Nihai HTML Raporu oluşturuldu: EWT_MultiStock_Analiz.html")
+
+if __name__ == "__main__":
+    init_db(); set_seeds()
+    macro = get_macro_data()
+    final_res = []
+    for t, cfg in TICKERS_CONFIG.items():
+        res = analyze_ticker(t, cfg, macro)
+        if res: final_res.append(res)
+    if final_res: generate_final_html(final_res)
