@@ -1,8 +1,8 @@
-name: 30-Minute Stock Analysis
+name: 1-Hour Stock Analysis
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Her 30 dakikada bir çalıştır
+    - cron: '0 * * * *' # Her 1 saatte bir çalıştır
   workflow_dispatch: # İstediğiniz zaman manuel tetikleyebilmeniz için buton ekler
 
 permissions:
@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # İstediğiniz versiyonu seçebilirsiniz
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
@@ -32,5 +32,5 @@ jobs:
       - name: Commit and Push Generated HTML
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Otomatik Güncelleme: MultiStock_v25.html"
+          commit_message: "Otomatik Güncelleme: MultiStock_v25.html (Saatlik)"
           file_pattern: 'MultiStock_v25.html'
