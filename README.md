@@ -30,5 +30,3 @@ This framework is optimized for analyzing technology sector stocks (e.g., INTC, 
 ## Disclaimer
 
 This project is for educational and research purposes. Financial trading involves significant risk. The author does not guarantee the accuracy of predictions or the profitability of strategies tested within this framework.
-README.md
-README.md görüntüleniyor.
