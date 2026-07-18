@@ -330,7 +330,7 @@ NEWS_CACHE_DIR = os.path.join(BASE_DIR, "news_cache")
 
 # WORDPRESS PUBLIC_HTML YOLUNU BURAYA YAZIN
 # Örnek: /home/kullanici_adiniz/public_html
-WP_OUTPUT_DIR = "/home/kullanici_adiniz/public_html" 
+WP_OUTPUT_DIR = "https://ozgursaygi.com/MultiStock_v25.html" 
 
 FEATURE_COLS = ['mom5', 'mom20', 'vol20', 'vol60', 'sma_ratio', 'rsi14', 'dist_high', 'vix']
 if USE_NEWS_FEATURES:
