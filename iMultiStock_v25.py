@@ -193,78 +193,78 @@ def fetch_news_gdelt_timeline(query: str, start: str, end: str,
 TICKERS = {
     # Bellek / depolama
     'SNDK':  {'name': 'SanDisk Corporation',        'benchmark': 'SOXX'},
-    'MU':    {'name': 'Micron Technology',           'benchmark': 'SOXX'},
-    'WDC':   {'name': 'Western Digital',             'benchmark': 'SOXX'},
-    'STX':   {'name': 'Seagate Technology',          'benchmark': 'SOXX'},
+    'MU':    {'name': 'Micron Technology',          'benchmark': 'SOXX'},
+    'WDC':   {'name': 'Western Digital',            'benchmark': 'SOXX'},
+    'STX':   {'name': 'Seagate Technology',         'benchmark': 'SOXX'},
     # CPU
-    'INTC':  {'name': 'Intel Corporation',           'benchmark': 'SOXX'},
-    'AMD':   {'name': 'Advanced Micro Devices',      'benchmark': 'SOXX'},
+    'INTC':  {'name': 'Intel Corporation',          'benchmark': 'SOXX'},
+    'AMD':   {'name': 'Advanced Micro Devices',     'benchmark': 'SOXX'},
     # Küçük-cap yarı iletken tedarikçileri
-    'AXTI':  {'name': 'AXT Inc.',                    'benchmark': 'SOXX'},
-    'AEHR':  {'name': 'Aehr Test Systems',           'benchmark': 'SOXX'},
-    'ALAB':  {'name': 'Astera Labs',                 'benchmark': 'SOXX'},
-    'CRDO':  {'name': 'Credo Technology',            'benchmark': 'SOXX'},
+    'AXTI':  {'name': 'AXT Inc.',                   'benchmark': 'SOXX'},
+    'AEHR':  {'name': 'Aehr Test Systems',          'benchmark': 'SOXX'},
+    'ALAB':  {'name': 'Astera Labs',                'benchmark': 'SOXX'},
+    'CRDO':  {'name': 'Credo Technology',           'benchmark': 'SOXX'},
     # Çip / ekipman / IP
-    'AVGO':  {'name': 'Broadcom Inc.',               'benchmark': 'SOXX'},
-    'MRVL':  {'name': 'Marvell Technology',          'benchmark': 'SOXX'},
-    'AMAT':  {'name': 'Applied Materials',           'benchmark': 'SOXX'},
-    'ARM':   {'name': 'Arm Holdings',                'benchmark': 'SOXX'},
-    'MPWR':  {'name': 'Monolithic Power Systems',    'benchmark': 'SOXX'},
-    'NVDA':  {'name': 'NVIDIA Corporation',          'benchmark': 'SOXX'},
+    'AVGO':  {'name': 'Broadcom Inc.',              'benchmark': 'SOXX'},
+    'MRVL':  {'name': 'Marvell Technology',         'benchmark': 'SOXX'},
+    'AMAT':  {'name': 'Applied Materials',          'benchmark': 'SOXX'},
+    'ARM':   {'name': 'Arm Holdings',               'benchmark': 'SOXX'},
+    'MPWR':  {'name': 'Monolithic Power Systems',   'benchmark': 'SOXX'},
+    'NVDA':  {'name': 'NVIDIA Corporation',         'benchmark': 'SOXX'},
     # Döküm / litografi / ekipman
-    'TSM':   {'name': 'Taiwan Semiconductor',        'benchmark': 'SOXX'},
-    'ASML':  {'name': 'ASML Holding',                'benchmark': 'SOXX'},
-    'LRCX':  {'name': 'Lam Research',                'benchmark': 'SOXX'},
-    'KLAC':  {'name': 'KLA Corporation',             'benchmark': 'SOXX'},
+    'TSM':   {'name': 'Taiwan Semiconductor',       'benchmark': 'SOXX'},
+    'ASML':  {'name': 'ASML Holding',               'benchmark': 'SOXX'},
+    'LRCX':  {'name': 'Lam Research',               'benchmark': 'SOXX'},
+    'KLAC':  {'name': 'KLA Corporation',            'benchmark': 'SOXX'},
     # EDA
-    'SNPS':  {'name': 'Synopsys Inc.',               'benchmark': 'SOXX'},
-    'CDNS':  {'name': 'Cadence Design Systems',      'benchmark': 'SOXX'},
+    'SNPS':  {'name': 'Synopsys Inc.',              'benchmark': 'SOXX'},
+    'CDNS':  {'name': 'Cadence Design Systems',     'benchmark': 'SOXX'},
     # Diğer çip üreticileri
-    'QCOM':  {'name': 'Qualcomm Inc.',               'benchmark': 'SOXX'},
-    'NXPI':  {'name': 'NXP Semiconductors',          'benchmark': 'SOXX'},
+    'QCOM':  {'name': 'Qualcomm Inc.',              'benchmark': 'SOXX'},
+    'NXPI':  {'name': 'NXP Semiconductors',         'benchmark': 'SOXX'},
     # Optik / ağ
-    'COHR':  {'name': 'Coherent Corp.',              'benchmark': 'SOXX'},
-    'LITE':  {'name': 'Lumentum Holdings',           'benchmark': 'SOXX'},
-    'ANET':  {'name': 'Arista Networks',             'benchmark': 'SOXX'},
+    'COHR':  {'name': 'Coherent Corp.',             'benchmark': 'SOXX'},
+    'LITE':  {'name': 'Lumentum Holdings',          'benchmark': 'SOXX'},
+    'ANET':  {'name': 'Arista Networks',            'benchmark': 'SOXX'},
     # Veri merkezi donanımı / güç
-    'VRT':   {'name': 'Vertiv Holdings',             'benchmark': 'SOXX'},
-    'SMCI':  {'name': 'Super Micro Computer',        'benchmark': 'SOXX'},
-    'DELL':  {'name': 'Dell Technologies',           'benchmark': 'SOXX'},
-    'CLS':   {'name': 'Celestica Inc.',              'benchmark': 'SOXX'},
+    'VRT':   {'name': 'Vertiv Holdings',            'benchmark': 'SOXX'},
+    'SMCI':  {'name': 'Super Micro Computer',       'benchmark': 'SOXX'},
+    'DELL':  {'name': 'Dell Technologies',          'benchmark': 'SOXX'},
+    'CLS':   {'name': 'Celestica Inc.',             'benchmark': 'SOXX'},
     # AI bulut / hyperscale
-    'CRWV':  {'name': 'CoreWeave Inc.',              'benchmark': 'SOXX'},
-    'NBIS':  {'name': 'Nebius Group',                'benchmark': 'SOXX'},
-    'ORCL':  {'name': 'Oracle Corporation',          'benchmark': 'SOXX'},
-    'RXT':   {'name': 'Rackspace Technology',        'benchmark': 'SOXX'},
-    'MSFT':  {'name': 'Microsoft Corporation',       'benchmark': 'SOXX'},
-    'META':  {'name': 'Meta Platforms',              'benchmark': 'SOXX'},
-    'AMZN':  {'name': 'Amazon.com Inc.',             'benchmark': 'SOXX'},
+    'CRWV':  {'name': 'CoreWeave Inc.',             'benchmark': 'SOXX'},
+    'NBIS':  {'name': 'Nebius Group',               'benchmark': 'SOXX'},
+    'ORCL':  {'name': 'Oracle Corporation',         'benchmark': 'SOXX'},
+    'RXT':   {'name': 'Rackspace Technology',       'benchmark': 'SOXX'},
+    'MSFT':  {'name': 'Microsoft Corporation',      'benchmark': 'SOXX'},
+    'META':  {'name': 'Meta Platforms',             'benchmark': 'SOXX'},
+    'AMZN':  {'name': 'Amazon.com Inc.',            'benchmark': 'SOXX'},
     # Yazılım / uygulama / güvenlik
-    'PLTR':  {'name': 'Palantir Technologies',       'benchmark': 'SOXX'},
-    'APP':   {'name': 'AppLovin Corporation',        'benchmark': 'SOXX'},
-    'CRWD':  {'name': 'CrowdStrike Holdings',        'benchmark': 'SOXX'},
-    'PANW':  {'name': 'Palo Alto Networks',          'benchmark': 'SOXX'},
-    'SNOW':  {'name': 'Snowflake Inc.',              'benchmark': 'SOXX'},
-    'NET':   {'name': 'Cloudflare Inc.',             'benchmark': 'SOXX'},
+    'PLTR':  {'name': 'Palantir Technologies',      'benchmark': 'SOXX'},
+    'APP':   {'name': 'AppLovin Corporation',       'benchmark': 'SOXX'},
+    'CRWD':  {'name': 'CrowdStrike Holdings',       'benchmark': 'SOXX'},
+    'PANW':  {'name': 'Palo Alto Networks',         'benchmark': 'SOXX'},
+    'SNOW':  {'name': 'Snowflake Inc.',             'benchmark': 'SOXX'},
+    'NET':   {'name': 'Cloudflare Inc.',            'benchmark': 'SOXX'},
     # Büyük teknoloji
-    'GOOGL': {'name': 'Alphabet Inc.',               'benchmark': 'SOXX'},
-    'AAPL':  {'name': 'Apple Inc.',                  'benchmark': 'SOXX'},
+    'GOOGL': {'name': 'Alphabet Inc.',              'benchmark': 'SOXX'},
+    'AAPL':  {'name': 'Apple Inc.',                 'benchmark': 'SOXX'},
     # Üretim ekipmanı / test / paketleme
-    'TER':   {'name': 'Teradyne, Inc.',              'benchmark': 'SOXX'},
-    'AMKR':  {'name': 'Amkor Technology',            'benchmark': 'SOXX'},
-    'TXN':   {'name': 'Texas Instruments',           'benchmark': 'SOXX'},
-    'ADI':   {'name': 'Analog Devices',              'benchmark': 'SOXX'},
+    'TER':   {'name': 'Teradyne, Inc.',             'benchmark': 'SOXX'},
+    'AMKR':  {'name': 'Amkor Technology',           'benchmark': 'SOXX'},
+    'TXN':   {'name': 'Texas Instruments',          'benchmark': 'SOXX'},
+    'ADI':   {'name': 'Analog Devices',             'benchmark': 'SOXX'},
     # Veri merkezi fiziksel altyapı / güç
-    'ETN':   {'name': 'Eaton Corporation',           'benchmark': 'SPY'},
-    'PWR':   {'name': 'Quanta Services',             'benchmark': 'SPY'},
-    'GEV':   {'name': 'GE Vernova',                  'benchmark': 'SPY'},
+    'ETN':   {'name': 'Eaton Corporation',          'benchmark': 'SPY'},
+    'PWR':   {'name': 'Quanta Services',            'benchmark': 'SPY'},
+    'GEV':   {'name': 'GE Vernova',                 'benchmark': 'SPY'},
     # Ağ / bağlantı donanımları
-    'APH':   {'name': 'Amphenol Corporation',        'benchmark': 'SPY'},
-    'GLW':   {'name': 'Corning Inc.',                'benchmark': 'SPY'},
+    'APH':   {'name': 'Amphenol Corporation',       'benchmark': 'SPY'},
+    'GLW':   {'name': 'Corning Inc.',               'benchmark': 'SPY'},
     # Kurumsal AI yazılımı / danışmanlık
-    'NOW':   {'name': 'ServiceNow, Inc.',            'benchmark': 'QQQ'},
-    'ACN':   {'name': 'Accenture plc',               'benchmark': 'SPY'},
-    'CRM':   {'name': 'Salesforce, Inc.',            'benchmark': 'QQQ'},
+    'NOW':   {'name': 'ServiceNow, Inc.',           'benchmark': 'QQQ'},
+    'ACN':   {'name': 'Accenture plc',              'benchmark': 'SPY'},
+    'CRM':   {'name': 'Salesforce, Inc.',           'benchmark': 'QQQ'},
 }
 
 # !! SELECTION BIAS WARNING !!
@@ -323,7 +323,14 @@ CONVICTION_PCTL      = 60
 # --- NEWS FEATURES (model input, leakage-safe) ---
 USE_NEWS_FEATURES = True
 NEWS_HALFLIFE     = 3.0
-NEWS_CACHE_DIR    = "news_cache"
+
+# --- ABSOLUTE PATHS FOR CRON JOB & WORDPRESS INTEGRATION ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+NEWS_CACHE_DIR = os.path.join(BASE_DIR, "news_cache")
+
+# WORDPRESS PUBLIC_HTML YOLUNU BURAYA YAZIN
+# Örnek: /home/kullanici_adiniz/public_html
+WP_OUTPUT_DIR = "/home/kullanici_adiniz/public_html" 
 
 FEATURE_COLS = ['mom5', 'mom20', 'vol20', 'vol60', 'sma_ratio', 'rsi14', 'dist_high', 'vix']
 if USE_NEWS_FEATURES:
@@ -1998,10 +2005,23 @@ def main():
     results = finalize(results, FDR_Q)
 
     html = build_html(results)
-    out = "MultiStock_v25.html"
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"\n  HTML report -> {out}")
+    
+    # Dosyayı doğrudan web üzerinden erişilebilir WordPress dizinine kaydet
+    out_filename = "MultiStock_v25.html"
+    out = os.path.join(WP_OUTPUT_DIR, out_filename)
+    
+    try:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"\n  HTML report -> {out}")
+    except Exception as e:
+        print(f"\n  HATA: {out} dizinine yazılamadı! Lütfen WP_OUTPUT_DIR yolunu kontrol edin. Detay: {e}")
+        # Hata durumunda yedeği projenin kendi klasörüne kaydet
+        backup_out = os.path.join(BASE_DIR, out_filename)
+        with open(backup_out, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"  Yedek olarak buraya kaydedildi -> {backup_out}")
+        
     print("=" * 62)
     print("  DONE")
     print("=" * 62)
