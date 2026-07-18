@@ -166,17 +166,59 @@ def fetch_news_gdelt_timeline(query: str, start: str, end: str,
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
-TICKERS = {
-    # Either form works:
-    #   'TICKER': 'Display Name'
-    #   'TICKER': {'name': 'Display Name', 'benchmark': 'SOXX'}
-    'SPCX':  {'name': 'SpaceX', 'benchmark': 'SOXX'},
-    'INTC': {'name': 'Intel Corporation',     'benchmark': 'SOXX'},
-    'AAPL':  {'name': 'Apple Inc.', 'benchmark': 'SOXX'},
-    'NVDA': {'name': 'NVIDIA Corporation',     'benchmark': 'SOXX'},    
-    'GOOGL': {'name': 'Alphabet Inc.',     'benchmark': 'SOXX'},
-}
+# TICKERS = {
+#     # Either form works:
+#     #   'TICKER': 'Display Name'
+#     #   'TICKER': {'name': 'Display Name', 'benchmark': 'SOXX'}
+#     'SPCX':  {'name': 'SpaceX', 'benchmark': 'SOXX'},
+#     'INTC': {'name': 'Intel Corporation',     'benchmark': 'SOXX'},
+#     'AAPL':  {'name': 'Apple Inc.', 'benchmark': 'SOXX'},
+#     'NVDA': {'name': 'NVIDIA Corporation',     'benchmark': 'SOXX'},    
+#     'GOOGL': {'name': 'Alphabet Inc.',     'benchmark': 'SOXX'},
+# }
 
+TICKERS = {
+    # Bellek / depolama — 2026'nın liderleri
+    'SNDK':  {'name': 'SanDisk Corporation',        'benchmark': 'SOXX'},
+    'MU':    {'name': 'Micron Technology',           'benchmark': 'SOXX'},
+    'WDC':   {'name': 'Western Digital',             'benchmark': 'SOXX'},
+    'STX':   {'name': 'Seagate Technology',          'benchmark': 'SOXX'},
+    # CPU toparlanması
+    'INTC':  {'name': 'Intel Corporation',           'benchmark': 'SOXX'},
+    'AMD':   {'name': 'Advanced Micro Devices',      'benchmark': 'SOXX'},
+    # Küçük-cap yarı iletken tedarikçileri (2026'da devasa yükseliş)
+    'AXTI':  {'name': 'AXT Inc.',                    'benchmark': 'SOXX'},
+    'AEHR':  {'name': 'Aehr Test Systems',           'benchmark': 'SOXX'},
+    'ALAB':  {'name': 'Astera Labs',                 'benchmark': 'SOXX'},
+    'CRDO':  {'name': 'Credo Technology',            'benchmark': 'SOXX'},
+    # Çip / ekipman / IP
+    'AVGO':  {'name': 'Broadcom Inc.',               'benchmark': 'SOXX'},
+    'MRVL':  {'name': 'Marvell Technology',          'benchmark': 'SOXX'},
+    'AMAT':  {'name': 'Applied Materials',           'benchmark': 'SOXX'},
+    'ARM':   {'name': 'Arm Holdings',                'benchmark': 'SOXX'},
+    'MPWR':  {'name': 'Monolithic Power Systems',    'benchmark': 'SOXX'},
+    'NVDA':  {'name': 'NVIDIA Corporation',          'benchmark': 'SOXX'},
+    # Optik / ağ (AI ara bağlantı)
+    'COHR':  {'name': 'Coherent Corp.',              'benchmark': 'SOXX'},
+    'LITE':  {'name': 'Lumentum Holdings',           'benchmark': 'SOXX'},
+    'ANET':  {'name': 'Arista Networks',             'benchmark': 'SOXX'},
+    # Veri merkezi donanımı / güç
+    'VRT':   {'name': 'Vertiv Holdings',             'benchmark': 'SOXX'},
+    'SMCI':  {'name': 'Super Micro Computer',        'benchmark': 'SOXX'},
+    'DELL':  {'name': 'Dell Technologies',           'benchmark': 'SOXX'},
+    'CLS':   {'name': 'Celestica Inc.',              'benchmark': 'SOXX'},
+    # AI bulut / hyperscale
+    'CRWV':  {'name': 'CoreWeave Inc.',              'benchmark': 'SOXX'},
+    'NBIS':  {'name': 'Nebius Group',                'benchmark': 'SOXX'},
+    'ORCL':  {'name': 'Oracle Corporation',          'benchmark': 'SOXX'},
+    'RXT':   {'name': 'Rackspace Technology',        'benchmark': 'SOXX'},
+    # Yazılım / uygulama
+    'PLTR':  {'name': 'Palantir Technologies',       'benchmark': 'SOXX'},
+    'APP':   {'name': 'AppLovin Corporation',        'benchmark': 'SOXX'},
+    'CRWD':  {'name': 'CrowdStrike Holdings',        'benchmark': 'SOXX'},
+    'GOOGL': {'name': 'Alphabet Inc.',     'benchmark': 'SOXX'},
+    'AAPL':  {'name': 'Apple Inc.', 'benchmark': 'SOXX'},
+}
 
 def _ticker_meta(cfg):
     """Accept either a plain name string or a {'name':..., 'benchmark':...} dict."""
