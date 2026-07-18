@@ -1,22 +1,4 @@
 
-Gemini ile sohbet
-https://github.com/ozgursaygi/hisse buradaki kodları incelleyerek readme oluştur
-
-hisse projeniz için hazırladığım taslak README dosyasını aşağıda bulabilirsiniz.
-
-Projenizin teknik kapsamını (LSTM, regime-switching modelleri, Elliott Wave, teknik analiz ve CI/CD otomasyonu) yansıtan, hem profesyonel hem de açıklayıcı bir içerik oluşturdum.
-MD simgesi
-README
- MD 
-Açık
-
-Bu dosyayı doğrudan GitHub deponuza ekleyebilir veya ihtiyaç duyduğunuz farklı detaylar varsa (örneğin kurulum komutları veya lisans bilgisi) eklememi isteyebilirsiniz.
-
-
-
-
-Gemini bir yapay zeka modeli olduğu için hata yapabilir.
-
 # Hisse Analysis Framework
 
 `hisse` is a quantitative backtesting and algorithmic trading framework designed for automated stock market analysis. Built primarily in Python, the project integrates machine learning techniques and statistical models to analyze technology stocks and generate performance insights.
